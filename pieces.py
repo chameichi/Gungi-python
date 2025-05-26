@@ -44,5 +44,5 @@ class Pieces:
         """
         駒の情報を文字列で表現（デバッグ用）
         """
-        return f"{self.color.name} {self.name} at ({self.x}, {self.y})"
+        return f"{self.color} {self.name} at ({self.x}, {self.y})"
 
