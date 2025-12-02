@@ -2,6 +2,14 @@
 from dataclasses import dataclass, field
 from enum import Enum, auto
 import uuid
+import json
+
+GAME_SETTINGS = {}
+
+class DifficultyLevel(Enum):
+    BEGINNER = auto()
+    INTERMEDIATE = auto()
+    ADVANCED = auto()
 
 class Side(Enum):
     White = 1
@@ -80,6 +88,8 @@ class Piece:
     piece_type: PieceType
     color: Side
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    location: Loc = Loc.IN_HAND
+    level: int = 0  # ツケの数 (0ならツケ無し,2が最大)
 
     def movement(self) -> list[MovePattern]:
         t = self.piece_type
@@ -134,3 +144,40 @@ class Piece:
         if self.color == Side.Black:
             pats = [MovePattern(p.move_type, -p.dx, -p.dy, p.limit) for p in pats]
         return pats
+    
+    def update_level(self, delta: int) -> None:
+        """
+        ツケによって駒のレベルを更新する
+        """
+        new_level = self.level + delta
+        if new_level < 0 or new_level > 2:
+            raise ValueError("Invalid level update")
+        self.level = new_level
+    
+    def update_movement(self) -> None:
+        """
+        ツケによって、駒の移動パターンを更新する
+        ※ゲームの難易度によって制限がある（例: 入門では帥はツケられない）
+        """
+        game_settings = GAME_SETTINGS
+        if game_settings.get('difficulty_level') == DifficultyLevel.BEGINNER:
+            if self.piece_type == PieceType.SUI:
+                self.level = 0  # 帥はツケられない
+
+            
+def load_game_settings(settings: dict | None = None) -> dict:
+    """
+    ゲーム設定をロードする関数
+    ここでは難易度レベルを含む設定をこのファイルのグローバル変数に更新する
+    """
+    global GAME_SETTINGS
+    if settings is None:
+        with open("game_settings.json", "r", encoding="utf-8") as f:
+            settings = json.load(f)
+    elif isinstance(settings, dict):
+        settings = settings
+    else:
+        raise ValueError("Invalid settings format")
+    settings['difficulty_level'] = DifficultyLevel[settings['difficulty_level']]
+    GAME_SETTINGS = settings
+    return settings
