@@ -1,0 +1,10 @@
+[project]
+name = "gungi-python"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.136.1",
+    "httpx>=0.28.1",
+    "pyside6>=6.11.0",
+    "uvicorn>=0.46.0",
+]
