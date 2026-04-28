@@ -79,9 +79,10 @@ PIECE_COUNTS: dict[PieceType, int] = {
 
 
 class DifficultyLevel(Enum):
-    BEGINNER = auto()      # 入門: ツケ2段まで, 特殊駒 (弓/筒/砲/謀) なし
-    INTERMEDIATE = auto()  # 中級: ツケ3段, 特殊駒あり, 新あり
-    ADVANCED = auto()      # 上級: フルルール
+    INTRODUCTORY = auto()  # 入門編: 初期配置①, 特殊駒なし, ツケ2段, 帥ツケ無
+    BEGINNER = auto()      # 初級編: 初期配置②, 弓のみ, ツケ2段, 帥ツケ無
+    INTERMEDIATE = auto()  # 中級編: 自由配置, 全特殊駒, ツケ2段, 帥ツケ有
+    ADVANCED = auto()      # 上級編: 自由配置, 全特殊駒, ツケ3段, 帥ツケ有
 
 
 class Loc(Enum):

@@ -45,25 +45,47 @@ class Action:
 
 @dataclass
 class GameConfig:
-    difficulty: DifficultyLevel = DifficultyLevel.ADVANCED
+    difficulty: DifficultyLevel = DifficultyLevel.INTRODUCTORY
 
     @property
     def max_level(self) -> int:
-        # 入門: ツケ2段まで → level 0,1 のみ。中級/上級: level 0,1,2
-        return 1 if self.difficulty is DifficultyLevel.BEGINNER else 2
+        # ツケ最大段数: 上級のみ 3段 (level 0,1,2)、それ以外は 2段 (level 0,1)
+        return 2 if self.difficulty is DifficultyLevel.ADVANCED else 1
 
     @property
     def allow_arata(self) -> bool:
-        return self.difficulty is not DifficultyLevel.BEGINNER
+        # 新は対局段階の機構。すべての難易度で使用可能とする。
+        return True
 
     @property
     def allowed_pieces(self) -> set[PieceType]:
-        if self.difficulty is DifficultyLevel.BEGINNER:
+        if self.difficulty is DifficultyLevel.INTRODUCTORY:
+            # 特殊駒 (弓/筒/砲/謀) なし
             return {pt for pt in PIECE_COUNTS if pt not in {
                 PieceType.YUMI, PieceType.TSUTSU,
                 PieceType.OHDSUTSU, PieceType.BOUSHO,
             }}
+        if self.difficulty is DifficultyLevel.BEGINNER:
+            # 弓のみ可、その他特殊駒 (筒/砲/謀) は無し
+            return {pt for pt in PIECE_COUNTS if pt not in {
+                PieceType.TSUTSU, PieceType.OHDSUTSU, PieceType.BOUSHO,
+            }}
+        # 中級・上級: 全駒種
         return set(PIECE_COUNTS)
+
+    @property
+    def allow_sui_stack(self) -> bool:
+        # 帥ツケ (帥の上、または帥自身を上にツケる) は中級・上級のみ可
+        return self.difficulty in {
+            DifficultyLevel.INTERMEDIATE, DifficultyLevel.ADVANCED,
+        }
+
+    @property
+    def has_preset_layout(self) -> bool:
+        # 入門編・初級編は既定の初期配置あり、中級/上級は自由配置 (布陣段階)
+        return self.difficulty in {
+            DifficultyLevel.INTRODUCTORY, DifficultyLevel.BEGINNER,
+        }
 
     @property
     def allow_transform(self) -> bool:
@@ -73,57 +95,99 @@ class GameConfig:
 # ---------------------------------------------------------------------------
 # 初期配置
 # ---------------------------------------------------------------------------
-# 白側 (y=0..2) の盤上配置。黒側は (x, 8-y) に鏡写し。
-# ルール準拠: 盤上 13駒 + 手駒 12駒 で計 25駒。
-# 盤上配置はユーザ提供の写真から起こしたもので、ルールブック page 10 の例と
-# 一致するかは要再確認。
-_WHITE_INITIAL_BOARD: list[tuple[PieceType, int, int]] = [
-    # y=0 (自陣最後列): 大 帥 中
+# ルールブック page 14: 初期配置① と 初期配置② の白側座標。
+# 黒側は (x, y) → (W-1-x, H-1-y) の 180° 回転で配置 (point symmetry)。
+
+# 初期配置① (入門編): 特殊駒なし。盤上 13駒 + 手駒 7駒 = 20駒。
+_LAYOUT_1_BOARD: list[tuple[PieceType, int, int]] = [
+    # y=0: 大 帥 中
     (PieceType.TAISHO, 3, 0),
     (PieceType.SUI, 4, 0),
     (PieceType.CHUJO, 5, 0),
-
-    # y=1: 忍 弓 槍 弓 馬
-    (PieceType.SHINOBI, 2, 1),
-    (PieceType.YUMI, 3, 1),
+    # y=1: 忍 槍 忍
+    (PieceType.SHINOBI, 1, 1),
     (PieceType.YARI, 4, 1),
-    (PieceType.YUMI, 5, 1),
-    (PieceType.KIBA, 6, 1),
-
-    # y=2 (自陣最前列): 砦 侍 兵 侍 砦
-    (PieceType.TORIDE, 1, 2),
-    (PieceType.SAMURAI, 2, 2),
+    (PieceType.SHINOBI, 7, 1),
+    # y=2: 兵 砦 侍 兵 侍 砦 兵
+    (PieceType.HYOU, 0, 2),
+    (PieceType.TORIDE, 2, 2),
+    (PieceType.SAMURAI, 3, 2),
     (PieceType.HYOU, 4, 2),
-    (PieceType.SAMURAI, 6, 2),
-    (PieceType.TORIDE, 7, 2),
+    (PieceType.SAMURAI, 5, 2),
+    (PieceType.TORIDE, 6, 2),
+    (PieceType.HYOU, 8, 2),
 ]
 
-# 残り 12駒は手駒として開始 (新で打てる)
-_WHITE_INITIAL_HAND: list[PieceType] = [
+_LAYOUT_1_HAND: list[PieceType] = [
+    PieceType.SHOUSHO, PieceType.SHOUSHO,
+    PieceType.YARI, PieceType.YARI,
+    PieceType.KIBA, PieceType.KIBA,
+    PieceType.HYOU,
+]
+
+# 初期配置② (初級編): 弓のみ特殊駒可。盤上 15駒 + 手駒 7駒 = 22駒。
+_LAYOUT_2_BOARD: list[tuple[PieceType, int, int]] = [
+    # y=0: 大 帥 中
+    (PieceType.TAISHO, 3, 0),
+    (PieceType.SUI, 4, 0),
+    (PieceType.CHUJO, 5, 0),
+    # y=1: 忍 弓 槍 弓 馬
+    (PieceType.SHINOBI, 1, 1),
+    (PieceType.YUMI, 2, 1),
+    (PieceType.YARI, 4, 1),
+    (PieceType.YUMI, 6, 1),
+    (PieceType.KIBA, 7, 1),
+    # y=2: 兵 砦 侍 兵 侍 砦 兵
+    (PieceType.HYOU, 0, 2),
+    (PieceType.TORIDE, 2, 2),
+    (PieceType.SAMURAI, 3, 2),
+    (PieceType.HYOU, 4, 2),
+    (PieceType.SAMURAI, 5, 2),
+    (PieceType.TORIDE, 6, 2),
+    (PieceType.HYOU, 8, 2),
+]
+
+_LAYOUT_2_HAND: list[PieceType] = [
     PieceType.SHOUSHO, PieceType.SHOUSHO,
     PieceType.YARI, PieceType.YARI,
     PieceType.SHINOBI,
-    PieceType.HYOU, PieceType.HYOU, PieceType.HYOU,
     PieceType.KIBA,
-    PieceType.TSUTSU,
-    PieceType.OHDSUTSU,
-    PieceType.BOUSHO,
+    PieceType.HYOU,
 ]
 
 
-def _validate_initial() -> None:
+def _validate_layout(
+    board: list[tuple[PieceType, int, int]],
+    hand: list[PieceType],
+    excluded: set[PieceType],
+) -> None:
     from collections import Counter
-    counts = Counter(pt for pt, _, _ in _WHITE_INITIAL_BOARD)
-    for pt in _WHITE_INITIAL_HAND:
+    counts = Counter(pt for pt, _, _ in board)
+    for pt in hand:
         counts[pt] += 1
     for pt, expected in PIECE_COUNTS.items():
-        if counts[pt] != expected:
+        if pt in excluded:
+            if counts[pt] != 0:
+                raise AssertionError(
+                    f"excluded piece {pt.name} appears {counts[pt]} times"
+                )
+        elif counts[pt] != expected:
             raise AssertionError(
-                f"initial layout has {counts[pt]} {pt.name}, expected {expected}"
+                f"layout has {counts[pt]} {pt.name}, expected {expected}"
             )
 
 
-_validate_initial()
+_validate_layout(
+    _LAYOUT_1_BOARD, _LAYOUT_1_HAND,
+    excluded={
+        PieceType.YUMI, PieceType.TSUTSU,
+        PieceType.OHDSUTSU, PieceType.BOUSHO,
+    },
+)
+_validate_layout(
+    _LAYOUT_2_BOARD, _LAYOUT_2_HAND,
+    excluded={PieceType.TSUTSU, PieceType.OHDSUTSU, PieceType.BOUSHO},
+)
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +206,11 @@ class Game:
     winner: Side | None = None
     move_count: int = 0
     phase: GamePhase = GamePhase.PLAY  # _setup_initial で必要に応じて PLACEMENT に上書き
+
+    # 布陣完了フラグ (Side ごと)
+    _placement_done: dict[Side, bool] = field(
+        default_factory=lambda: {Side.White: False, Side.Black: False}
+    )
 
     # 棋譜ナビゲーション用 (deepcopy したフルステートのリスト)
     _snapshots: list[dict[str, Any]] = field(default_factory=list, repr=False)
@@ -171,6 +240,7 @@ class Game:
             "move_count": self.move_count,
             "history": list(self.history),
             "phase": self.phase,
+            "placement_done": dict(self._placement_done),
         }
         self._snapshots.append(snap)
         self._snap_labels.append(label)
@@ -186,6 +256,9 @@ class Game:
         self.move_count = snap["move_count"]
         self.history = list(snap["history"])
         self.phase = snap.get("phase", GamePhase.PLAY)
+        self._placement_done = dict(
+            snap.get("placement_done", {Side.White: False, Side.Black: False})
+        )
         self._cursor = idx
 
     def reset(self, config: GameConfig | None = None) -> None:
@@ -204,12 +277,14 @@ class Game:
         self.move_count = 0
         self.turn = Side.White
         self.phase = GamePhase.PLAY
+        self._placement_done = {Side.White: False, Side.Black: False}
         self._snapshots = []
         self._snap_labels = []
         self._cursor = 0
         self._setup_initial()
         self._record_snapshot()
         diff_label = {
+            DifficultyLevel.INTRODUCTORY: "入門",
             DifficultyLevel.BEGINNER: "初級",
             DifficultyLevel.INTERMEDIATE: "中級",
             DifficultyLevel.ADVANCED: "上級",
@@ -244,11 +319,14 @@ class Game:
         - 自陣のみ、自駒のみ
         - 各プレイヤーの最初の駒は **帥** でなければならない
         - 自駒の上に積むのは可、帥の上には積めない、帥は1段目のみ
-        - 配置後も手番は同じ側のまま (好きなだけ置ける)。
-          手番交代は finish_placement() で明示的に行う。
+        - 配置完了済みの側は置けない
+        - 配置するごとに手番交代。ただし相手が配置完了済みなら
+          自分に手番が残る。
         """
         if self.phase is not GamePhase.PLACEMENT:
             raise ValueError("布陣段階ではありません")
+        if self._placement_done[self.turn]:
+            raise ValueError("既に配置完了済みです")
         piece = next((p for p in self.hand[self.turn] if p.id == piece_id), None)
         if piece is None:
             raise ValueError("自分の手駒に該当する駒がありません")
@@ -281,40 +359,63 @@ class Game:
         self.board.place_initial(piece, x, y)
         side_mark = "▲" if self.turn is Side.White else "△"
         label = f"{side_mark}{piece.kanji} 布陣→({x},{y})"
-        # 手番は交代しない (同じプレイヤーが好きなだけ置く)
+        # 相手が完了済みでなければ手番交代 (一手ごとに交互)
+        other = self.turn.opponent()
+        if not self._placement_done[other]:
+            self.turn = other
         self._snapshot_full_state(label=label)
 
     def finish_placement(self) -> None:
-        """配置完了ボタン処理。
+        """配置完了 (済み) 宣言。公式ルール準拠。
 
-        - 先手 (白) の手番中に押された場合 → 白の帥が置かれていれば
-          後手 (黒) の配置フェーズに移行 (PLACEMENT のまま、turn を黒に)
-        - 後手 (黒) の手番中に押された場合 → 黒の帥が置かれていて、
-          かつ両陣の帥がアタリでなければ、対局段階 (PLAY) に移行し
-          turn を白 (先手) に戻す
+        順序ルール:
+        - 先手が先に宣言する。後手は先手が未宣言なら宣言できない
+          (置き続けるか、先手の宣言を待つ)。
+        - 先手の宣言: 後手は単独で配置を続けることができる。
+          先手は自身の帥アタリを解消していなければならない。
+        - 後手の宣言: その時点で初期配置全体が終了する。
+          両陣の帥アタリが解消されていることを必須。
         """
         if self.phase is not GamePhase.PLACEMENT:
             raise ValueError("既に対局段階です")
         side = self.turn
-        side_label = "白 (先手)" if side is Side.White else "黒 (後手)"
+        if self._placement_done[side]:
+            raise ValueError("既に配置完了済みです")
+
+        # 先手が先に宣言する必要がある
+        if side is Side.Black and not self._placement_done[Side.White]:
+            raise ValueError(
+                "先手の「配置完了」が先です。"
+                "配置を続けるか、先手の宣言をお待ちください"
+            )
+
+        side_label = "先手 (白)" if side is Side.White else "後手 (黒)"
         if self.board.find_sui(side) is None:
             raise ValueError(f"{side_label}の帥が未配置です")
 
+        # 完了するプレイヤーは自分の帥アタリを必ず解消すること
+        if self.is_sui_attacked(side):
+            raise ValueError(
+                f"{side_label}の帥にアタリが掛かっています。"
+                "配置完了の前に遮断するなどして解消してください"
+            )
+
         if side is Side.White:
-            # 先手の配置が完了 → 後手の配置フェーズへ
+            # 先手の宣言 → 後手継続
+            self._placement_done[Side.White] = True
             self.turn = Side.Black
-            self._snapshot_full_state(label="先手 配置完了 / 後手の配置")
+            self._snapshot_full_state(
+                label="先手 配置完了 / 後手の配置継続"
+            )
             return
 
-        # 後手の配置完了 → 両陣帥アタリ確認 → 対局開始
+        # 後手の宣言 → 配置終了。両陣帥アタリの最終確認。
         if self.is_sui_attacked(Side.White):
             raise ValueError(
-                "白の帥にアタリが掛かっています。配置を見直してください"
+                "白の帥にアタリが掛かっています。"
+                "あなたの駒が相手の帥を脅かしています。配置を見直してください"
             )
-        if self.is_sui_attacked(Side.Black):
-            raise ValueError(
-                "黒の帥にアタリが掛かっています。配置を見直してください"
-            )
+        self._placement_done[Side.Black] = True
         self.phase = GamePhase.PLAY
         self.turn = Side.White
         self._snapshot_full_state(label="後手 配置完了 / 対局開始")
@@ -414,32 +515,24 @@ class Game:
     def _setup_initial(self) -> None:
         """難易度に応じた初期化。
 
-        - BEGINNER (初級): 既定の初期配置 (盤上11駒 + 手駒9駒)、対局段階で開始。
-        - INTERMEDIATE / ADVANCED: 全 25駒 (許容駒種) を手駒に持って布陣段階で開始。
+        - 入門編 (INTRODUCTORY): 初期配置①、特殊駒なし。対局段階で開始。
+        - 初級編 (BEGINNER): 初期配置②、弓のみ。対局段階で開始。
+        - 中級編 (INTERMEDIATE): 全駒種、自由配置 (布陣段階)。
+        - 上級編 (ADVANCED): 全駒種、自由配置 (布陣段階)。
+
+        黒側は 180° 回転 ((x,y) → (W-1-x, H-1-y))。
         """
-        if self.config.difficulty is DifficultyLevel.BEGINNER:
+        diff = self.config.difficulty
+        if diff is DifficultyLevel.INTRODUCTORY:
+            self._apply_layout(_LAYOUT_1_BOARD, _LAYOUT_1_HAND)
             self.phase = GamePhase.PLAY
-            allowed = self.config.allowed_pieces
-            h = self.board.height
-            for pt, x, y in _WHITE_INITIAL_BOARD:
-                if pt not in allowed:
-                    continue
-                self.board.place_initial(Piece(piece_type=pt, color=Side.White), x, y)
-                self.board.place_initial(
-                    Piece(piece_type=pt, color=Side.Black), x, h - 1 - y
-                )
-            for pt in _WHITE_INITIAL_HAND:
-                if pt not in allowed:
-                    continue
-                self.hand[Side.White].append(
-                    Piece(piece_type=pt, color=Side.White, location=Loc.IN_HAND)
-                )
-                self.hand[Side.Black].append(
-                    Piece(piece_type=pt, color=Side.Black, location=Loc.IN_HAND)
-                )
+            return
+        if diff is DifficultyLevel.BEGINNER:
+            self._apply_layout(_LAYOUT_2_BOARD, _LAYOUT_2_HAND)
+            self.phase = GamePhase.PLAY
             return
 
-        # 中級/上級: 全駒種を手駒に持って布陣からスタート
+        # 中級/上級: 全駒を手駒に持って布陣からスタート
         self.phase = GamePhase.PLACEMENT
         for pt, count in PIECE_COUNTS.items():
             if pt not in self.config.allowed_pieces:
@@ -451,6 +544,27 @@ class Game:
                 self.hand[Side.Black].append(
                     Piece(piece_type=pt, color=Side.Black, location=Loc.IN_HAND)
                 )
+
+    def _apply_layout(
+        self,
+        board_layout: list[tuple[PieceType, int, int]],
+        hand_layout: list[PieceType],
+    ) -> None:
+        w, h = self.board.width, self.board.height
+        for pt, x, y in board_layout:
+            self.board.place_initial(Piece(piece_type=pt, color=Side.White), x, y)
+            # 黒は 180° 回転 (x,y) → (w-1-x, h-1-y)
+            self.board.place_initial(
+                Piece(piece_type=pt, color=Side.Black),
+                w - 1 - x, h - 1 - y,
+            )
+        for pt in hand_layout:
+            self.hand[Side.White].append(
+                Piece(piece_type=pt, color=Side.White, location=Loc.IN_HAND)
+            )
+            self.hand[Side.Black].append(
+                Piece(piece_type=pt, color=Side.Black, location=Loc.IN_HAND)
+            )
 
     # ---------------- スナップショット & 千日手 ----------------
 

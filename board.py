@@ -94,19 +94,25 @@ class Board:
             if top is None:
                 results.append((nx, ny))
                 continue
-            # 何かある → ここまでが走れる終点。敵駒なら着地可、自駒なら止まるだけ。
-            if top.color is not piece.color:
+            # 何かある → ここまでが走れる終点。
+            # 敵駒であり、かつ移動駒のレベル ≧ 相手レベルなら捕獲可能。
+            # 自駒、もしくはレベルが下回る敵駒には移動できず遮断のみ。
+            if top.color is not piece.color and piece.level >= top.level:
                 results.append((nx, ny))
             break
         return results
 
     def _can_land_on(self, x: int, y: int, piece: Piece) -> bool:
+        """MOVE 着地可否。空マスはOK、自駒最上段はNG、
+        敵駒最上段は移動駒のレベル ≧ 相手レベルのときのみOK。"""
         if not self.in_bounds(x, y):
             return False
         top = self.top_piece(x, y)
         if top is None:
             return True
-        return top.color is not piece.color
+        if top.color is piece.color:
+            return False
+        return piece.level >= top.level
 
     # ---------------- 操作 (低レベル) ----------------
 
@@ -145,6 +151,10 @@ class Board:
             top = dst_stack[-1]
             if top.color is mover.color:
                 raise ValueError("cannot move onto own piece (use stack_on_top)")
+            if mover.level < top.level:
+                raise ValueError(
+                    "ツケていない駒 (低いレベル) はツケ駒 (高いレベル) を取れません"
+                )
             captured = dst_stack.pop()
             captured.location = Loc.CAPTURED
 

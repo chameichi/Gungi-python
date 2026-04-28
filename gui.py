@@ -687,6 +687,7 @@ class GungiWindow(QMainWindow):
         self.btn_new_game.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         new_menu = QMenu(self.btn_new_game)
         for diff, label in (
+            (DifficultyLevel.INTRODUCTORY, "入門"),
             (DifficultyLevel.BEGINNER, "初級"),
             (DifficultyLevel.INTERMEDIATE, "中級"),
             (DifficultyLevel.ADVANCED, "上級"),
@@ -839,9 +840,15 @@ class GungiWindow(QMainWindow):
             n_hand = len(self.game.hand[self.game.turn])
             on_board = self.game._count_own_pieces_on_board(self.game.turn)
             sui_placed = self.game.board.find_sui(self.game.turn) is not None
+            done_w = self.game._placement_done[Side.White]
+            done_b = self.game._placement_done[Side.Black]
             phase_label = (
                 "先手の配置中" if self.game.turn is Side.White else "後手の配置中"
             )
+            other_done = " (相手は配置完了済み)" if (
+                (self.game.turn is Side.White and done_b)
+                or (self.game.turn is Side.Black and done_w)
+            ) else ""
             if not sui_placed:
                 hint = " — まず帥を自陣に置いてください"
             elif self.selection.arata_piece_id:
@@ -849,7 +856,7 @@ class GungiWindow(QMainWindow):
             else:
                 hint = " — 駒を選んで自陣マスをクリック / 完了したら「配置完了」"
             self.statusBar().showMessage(
-                f"[{phase_label}] 残手駒: {n_hand} / 配置済: {on_board}{hint}"
+                f"[{phase_label}{other_done}] 残手駒: {n_hand} / 配置済: {on_board}{hint}"
             )
             return
         if self.game.winner is not None:
@@ -957,7 +964,8 @@ class GungiWindow(QMainWindow):
 
     def on_new_game(self, difficulty: DifficultyLevel) -> None:
         label = {
-            DifficultyLevel.BEGINNER: "初級 (既定の初期配置から対局)",
+            DifficultyLevel.INTRODUCTORY: "入門 (初期配置①から対局, 特殊駒なし)",
+            DifficultyLevel.BEGINNER: "初級 (初期配置②から対局, 弓のみ)",
             DifficultyLevel.INTERMEDIATE: "中級 (布陣段階から開始)",
             DifficultyLevel.ADVANCED: "上級 (布陣段階から開始)",
         }.get(difficulty, str(difficulty))
@@ -988,7 +996,11 @@ class GungiWindow(QMainWindow):
         try:
             self.game.finish_placement()
         except ValueError as e:
-            QMessageBox.warning(self, "布陣完了できません", str(e))
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Critical)
+            box.setWindowTitle("配置完了できません")
+            box.setText(str(e))
+            box.exec()
             return
         self._reset_selection()
         self.refresh()
@@ -1182,8 +1194,8 @@ def main() -> None:
     except (AttributeError, Exception):
         pass
 
-    # 起動時は初級の既定配置で開始 (中級/上級は空盤なので明示的に「新規対局」から選ぶ)
-    game = Game(config=GameConfig(difficulty=DifficultyLevel.BEGINNER))
+    # 起動時は入門編の既定配置で開始 (中級/上級は空盤なので明示的に「新規対局」から選ぶ)
+    game = Game(config=GameConfig(difficulty=DifficultyLevel.INTRODUCTORY))
     win = GungiWindow(game)
     win.resize(1200, 820)
     win.show()

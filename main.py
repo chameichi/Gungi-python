@@ -25,8 +25,8 @@ def try_move(game: Game, src: tuple[int, int], dst: tuple[int, int]) -> bool:
 
 
 def main() -> None:
-    # 初級 = 既定の初期配置 (盤上11駒+手駒9駒)。中級/上級は空盤なので CLI デモには不向き。
-    game = Game(config=GameConfig(difficulty=DifficultyLevel.BEGINNER))
+    # 入門 = 既定の初期配置 (初期配置①)。中級/上級は空盤なので CLI デモには不向き。
+    game = Game(config=GameConfig(difficulty=DifficultyLevel.INTRODUCTORY))
     show(game, "initial")
 
     # 白の 兵 (4,2) を前進
