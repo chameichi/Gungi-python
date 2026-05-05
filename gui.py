@@ -1,4 +1,4 @@
-"""PySide6 GUI (ShogiHome 風レイアウト)。
+"""PySide6 GUI。
 
 レイアウト:
     +----------------------------------------------------------+
@@ -326,6 +326,102 @@ class EditDialog(QDialog):
         self.accept()
 
 
+class AddPieceDialog(QDialog):
+    """編集モード: 駒を盤外コレクション (手駒/捕獲駒) に追加するダイアログ。"""
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("手駒/捕獲駒に追加")
+        self.piece_type: PieceType | None = None
+        self.color: Side | None = None
+        self.target: str | None = None  # 'hand' or 'captured'
+
+        v = QVBoxLayout(self)
+        v.setSpacing(8)
+        v.setContentsMargins(16, 16, 16, 16)
+
+        v.addWidget(QLabel("駒種:"))
+        self.combo = QComboBox()
+        for pt in PieceType:
+            self.combo.addItem(PIECES_NAME[pt], pt)
+        self.combo.setMinimumHeight(32)
+        v.addWidget(self.combo)
+
+        v.addWidget(QLabel("色:"))
+        cr = QHBoxLayout()
+        self.rb_white = QRadioButton("白 (先手)")
+        self.rb_black = QRadioButton("黒 (後手)")
+        self.rb_white.setChecked(True)
+        cg = QButtonGroup(self)
+        cg.addButton(self.rb_white)
+        cg.addButton(self.rb_black)
+        cr.addWidget(self.rb_white)
+        cr.addWidget(self.rb_black)
+        v.addLayout(cr)
+
+        v.addWidget(QLabel("追加先:"))
+        tr = QHBoxLayout()
+        self.rb_hand = QRadioButton("手駒")
+        self.rb_cap = QRadioButton("捕獲駒")
+        self.rb_hand.setChecked(True)
+        tg = QButtonGroup(self)
+        tg.addButton(self.rb_hand)
+        tg.addButton(self.rb_cap)
+        tr.addWidget(self.rb_hand)
+        tr.addWidget(self.rb_cap)
+        v.addLayout(tr)
+
+        ok_btn = QPushButton("追加")
+        ok_btn.setMinimumHeight(40)
+        ok_btn.setStyleSheet(_DIALOG_BTN_QSS)
+        ok_btn.clicked.connect(self._do_ok)
+        v.addWidget(ok_btn)
+        cancel_btn = QPushButton("キャンセル")
+        cancel_btn.setStyleSheet(_DIALOG_CANCEL_QSS)
+        cancel_btn.clicked.connect(self.reject)
+        v.addWidget(cancel_btn)
+
+    def _do_ok(self) -> None:
+        self.piece_type = self.combo.currentData()
+        self.color = Side.White if self.rb_white.isChecked() else Side.Black
+        self.target = "hand" if self.rb_hand.isChecked() else "captured"
+        self.accept()
+
+
+class SimpleAddDialog(QDialog):
+    """駒種だけを選ぶシンプルなダイアログ。
+    どこに追加するかは呼び出し元 (パネル) が知っている前提。"""
+
+    def __init__(self, parent: QWidget, title: str) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.piece_type: PieceType | None = None
+
+        v = QVBoxLayout(self)
+        v.setSpacing(8)
+        v.setContentsMargins(16, 16, 16, 16)
+        v.addWidget(QLabel("駒種:"))
+        self.combo = QComboBox()
+        for pt in PieceType:
+            self.combo.addItem(PIECES_NAME[pt], pt)
+        self.combo.setMinimumHeight(32)
+        v.addWidget(self.combo)
+
+        ok_btn = QPushButton("追加")
+        ok_btn.setMinimumHeight(40)
+        ok_btn.setStyleSheet(_DIALOG_BTN_QSS)
+        ok_btn.clicked.connect(self._do_ok)
+        v.addWidget(ok_btn)
+        cancel_btn = QPushButton("キャンセル")
+        cancel_btn.setStyleSheet(_DIALOG_CANCEL_QSS)
+        cancel_btn.clicked.connect(self.reject)
+        v.addWidget(cancel_btn)
+
+    def _do_ok(self) -> None:
+        self.piece_type = self.combo.currentData()
+        self.accept()
+
+
 # ---------------------------------------------------------------------------
 # BoardWidget
 # ---------------------------------------------------------------------------
@@ -515,36 +611,65 @@ class BoardWidget(QWidget):
 
 
 class PlayerHeader(QFrame):
+    """プレイヤー名と手番インジケータをミニマルに表示する帯。"""
+
     def __init__(self, side: Side) -> None:
         super().__init__()
         self.side = side
-        self.setFixedHeight(44)
-        self.label = QLabel()
-        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        f = QFont()
-        f.setPointSize(13)
-        f.setBold(True)
-        self.label.setFont(f)
+        self.setFixedHeight(30)
+
+        # 駒色ドット (●: 黒, ○: 白)
+        self.dot = QLabel("●" if side is Side.Black else "○")
+        df = QFont()
+        df.setPointSize(13)
+        self.dot.setFont(df)
+        self.dot.setStyleSheet("color:#222;" if side is Side.Black else "color:#222;")
+
+        self.name_label = QLabel()
+        nf = QFont()
+        nf.setPointSize(11)
+        self.name_label.setFont(nf)
+
+        # 手番中インジケータ (右端、アクティブ時のみ視認)
+        self.turn_label = QLabel("")
+        tf = QFont()
+        tf.setPointSize(10)
+        self.turn_label.setFont(tf)
+
         h = QHBoxLayout(self)
-        h.setContentsMargins(8, 4, 8, 4)
-        h.addWidget(self.label)
+        h.setContentsMargins(10, 2, 10, 2)
+        h.setSpacing(8)
+        h.addWidget(self.dot)
+        h.addWidget(self.name_label)
+        h.addStretch(1)
+        h.addWidget(self.turn_label)
         self.setActive(False)
 
     def setActive(self, active: bool) -> None:
-        bg = COL_HEADER_BG_ACTIVE if active else COL_HEADER_BG_IDLE
-        self.setStyleSheet(
-            f"PlayerHeader {{ background:{bg}; border-radius:4px; }}"
-            f"QLabel {{ color:{COL_HEADER_FG}; }}"
-        )
-        prefix = "後手 (黒)" if self.side is Side.Black else "先手 (白)"
-        marker = " ●手番" if active else ""
-        self.label.setText(prefix + marker)
+        prefix = "後手" if self.side is Side.Black else "先手"
+        self.name_label.setText(prefix)
+        if active:
+            self.turn_label.setText("● 手番")
+            self.turn_label.setStyleSheet(
+                "color:#2e7d32; font-weight:bold;"
+            )
+            self.setStyleSheet(
+                "PlayerHeader { background:transparent; "
+                "border-bottom:2px solid #2e7d32; }"
+            )
+        else:
+            self.turn_label.setText("")
+            self.setStyleSheet(
+                "PlayerHeader { background:transparent; "
+                "border-bottom:1px solid rgba(128,128,128,0.35); }"
+            )
 
 
 class HandPanel(QFrame):
-    """手駒・捕獲駒の一覧。クリックで piece_id を Signal で通知。"""
+    """手駒・捕獲駒の一覧。クリックで piece_id を、+ボタンで追加要求を通知。"""
 
-    pieceClicked = Signal(str)  # piece_id
+    pieceClicked = Signal(str)   # piece_id
+    addRequested = Signal()      # 編集モードの "+" ボタン
 
     def __init__(self, title: str) -> None:
         super().__init__()
@@ -553,8 +678,30 @@ class HandPanel(QFrame):
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self._title = QLabel(title)
         f = QFont()
-        f.setBold(True)
+        f.setPointSize(10)
         self._title.setFont(f)
+        self._title.setStyleSheet(
+            "color: rgba(128,128,128,0.9); letter-spacing: 1px;"
+        )
+
+        self._add_btn = QPushButton("＋")
+        self._add_btn.setFixedSize(QSize(24, 20))
+        self._add_btn.setToolTip("駒種を選んで追加 (編集モード時のみ)")
+        self._add_btn.setStyleSheet(
+            "QPushButton { background:#2e7d32; color:#ffffff; "
+            "border:1px solid #1b5e20; border-radius:4px; font-weight:bold; }"
+            "QPushButton:hover { background:#43a047; }"
+            "QPushButton:disabled { background:#666; color:#aaa; }"
+        )
+        self._add_btn.setVisible(False)
+        self._add_btn.clicked.connect(self.addRequested.emit)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.addWidget(self._title)
+        header.addStretch(1)
+        header.addWidget(self._add_btn)
+
         self.list = QListWidget()
         self.list.setFlow(QListWidget.Flow.LeftToRight)
         self.list.setWrapping(True)
@@ -563,8 +710,12 @@ class HandPanel(QFrame):
         self.list.itemClicked.connect(self._on_clicked)
         v = QVBoxLayout(self)
         v.setContentsMargins(6, 4, 6, 4)
-        v.addWidget(self._title)
+        v.addLayout(header)
         v.addWidget(self.list)
+
+    def set_edit_mode(self, on: bool) -> None:
+        """編集モード時に "+" ボタンを表示/非表示。"""
+        self._add_btn.setVisible(on)
 
     def setSelectedPieceId(self, pid: str | None) -> None:
         for i in range(self.list.count()):
@@ -605,10 +756,13 @@ class MoveListPanel(QFrame):
         self.setObjectName("MoveListPanel")
         self.setProperty("class", "PanelFrame")
         self.setFrameShape(QFrame.Shape.StyledPanel)
-        title = QLabel("棋譜")
+        title = QLabel("MOVES")
         f = QFont()
-        f.setBold(True)
+        f.setPointSize(10)
         title.setFont(f)
+        title.setStyleSheet(
+            "color: rgba(128,128,128,0.9); letter-spacing: 1px;"
+        )
         self.list = QListWidget()
         self.list.itemActivated.connect(self._on_activate)
         self.list.itemClicked.connect(self._on_activate)
@@ -658,7 +812,7 @@ class GungiWindow(QMainWindow):
         self.legal_dests: set[tuple[int, int]] = set()
         self.edit_mode = False
 
-        self.setWindowTitle("軍議 - Gungi (ShogiHome 風)")
+        self.setWindowTitle("軍議 - Gungi")
         self._move_labels: list[str]  # placeholder; will be populated each refresh
         self._build_toolbar()
         self._build_central()
@@ -715,6 +869,10 @@ class GungiWindow(QMainWindow):
         self.act_turn.triggered.connect(self.on_toggle_turn)
         self.act_clear = tb.addAction("盤面クリア")
         self.act_clear.triggered.connect(self.on_clear_board)
+        self.act_add_piece = tb.addAction("駒追加")
+        self.act_add_piece.triggered.connect(self.on_add_piece)
+        self.act_phase = tb.addAction("段階切替")
+        self.act_phase.triggered.connect(self.on_toggle_phase)
         tb.addSeparator()
         # 布陣段階 (中級/上級) 専用
         self.act_finish = tb.addAction("配置完了")
@@ -738,8 +896,8 @@ class GungiWindow(QMainWindow):
         cv.addWidget(self.header_bot)
 
         # 左列: 黒手駒 / 黒捕獲駒
-        self.black_hand = HandPanel("黒 手駒")
-        self.black_cap = HandPanel("黒 捕獲駒")
+        self.black_hand = HandPanel("HAND")
+        self.black_cap = HandPanel("CAPTURED")
         left = QWidget()
         left.setFixedWidth(190)
         lv = QVBoxLayout(left)
@@ -749,8 +907,8 @@ class GungiWindow(QMainWindow):
         lv.addWidget(self.black_cap)
 
         # 右列: 棋譜 / 白手駒 / 白捕獲駒
-        self.white_hand = HandPanel("白 手駒")
-        self.white_cap = HandPanel("白 捕獲駒")
+        self.white_hand = HandPanel("HAND")
+        self.white_cap = HandPanel("CAPTURED")
         self.move_list = MoveListPanel()
         right = QWidget()
         right.setFixedWidth(260)
@@ -775,16 +933,29 @@ class GungiWindow(QMainWindow):
     def _connect_signals(self) -> None:
         self.board.cellClicked.connect(self.on_cell_clicked)
         self.black_hand.pieceClicked.connect(
-            lambda pid: self.on_hand_clicked(Side.Black, pid)
+            lambda pid: self.on_hand_clicked(Side.Black, pid, "hand")
         )
         self.black_cap.pieceClicked.connect(
-            lambda pid: self.on_hand_clicked(Side.Black, pid)
+            lambda pid: self.on_hand_clicked(Side.Black, pid, "captured")
         )
         self.white_hand.pieceClicked.connect(
-            lambda pid: self.on_hand_clicked(Side.White, pid)
+            lambda pid: self.on_hand_clicked(Side.White, pid, "hand")
         )
         self.white_cap.pieceClicked.connect(
-            lambda pid: self.on_hand_clicked(Side.White, pid)
+            lambda pid: self.on_hand_clicked(Side.White, pid, "captured")
+        )
+        # 各パネル + ボタン経由の追加
+        self.black_hand.addRequested.connect(
+            lambda: self.on_panel_add(Side.Black, "hand")
+        )
+        self.black_cap.addRequested.connect(
+            lambda: self.on_panel_add(Side.Black, "captured")
+        )
+        self.white_hand.addRequested.connect(
+            lambda: self.on_panel_add(Side.White, "hand")
+        )
+        self.white_cap.addRequested.connect(
+            lambda: self.on_panel_add(Side.White, "captured")
         )
         self.move_list.rowSelected.connect(self.on_move_list_clicked)
 
@@ -813,6 +984,9 @@ class GungiWindow(QMainWindow):
         self.black_cap.setPieces(self.game.captured_by[Side.Black], self.selection.arata_piece_id)
         self.white_hand.setPieces(self.game.hand[Side.White], self.selection.arata_piece_id)
         self.white_cap.setPieces(self.game.captured_by[Side.White], self.selection.arata_piece_id)
+        # パネルの「+」ボタンを編集モード時のみ表示
+        for panel in (self.black_hand, self.black_cap, self.white_hand, self.white_cap):
+            panel.set_edit_mode(self.edit_mode)
 
         labels = getattr(self.game, "_snap_labels", None)
         if labels is None:
@@ -828,6 +1002,9 @@ class GungiWindow(QMainWindow):
         self.act_last.setEnabled(self.game.can_redo())
         self.act_clear.setEnabled(self.edit_mode)
         self.act_turn.setEnabled(self.edit_mode)
+        self.act_add_piece.setEnabled(self.edit_mode)
+        self.act_phase.setEnabled(self.edit_mode)
+        # 配置完了はゲーム操作なので編集モード中は無効化
         self.act_finish.setEnabled(is_placement and not self.edit_mode)
 
         # ステータス
@@ -941,9 +1118,15 @@ class GungiWindow(QMainWindow):
         self._reset_selection()
         self.refresh()
 
-    def on_hand_clicked(self, side: Side, piece_id: str) -> None:
-        if self.edit_mode or self.game.winner is not None:
+    def on_hand_clicked(self, side: Side, piece_id: str, source: str = "hand") -> None:
+        if self.edit_mode:
+            self._handle_edit_hand_click(side, piece_id, source)
             return
+        if self.game.winner is not None:
+            return
+        if source == "captured":
+            # 通常モードでは捕獲駒も新で再利用可 (apply_arata 側で hand+captured 検索)
+            pass
         if side is not self.game.turn:
             QMessageBox.information(self, "新", "相手側の駒は使えません")
             return
@@ -952,6 +1135,27 @@ class GungiWindow(QMainWindow):
         else:
             self._reset_selection()
             self.selection.arata_piece_id = piece_id
+        self.refresh()
+
+    def _handle_edit_hand_click(
+        self, side: Side, piece_id: str, source: str
+    ) -> None:
+        side_label = "白" if side is Side.White else "黒"
+        list_label = "手駒" if source == "hand" else "捕獲駒"
+        ans = QMessageBox.question(
+            self, "駒の削除",
+            f"{side_label}の{list_label}からこの駒を削除しますか?",
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            if source == "hand":
+                self.game.edit_remove_from_hand(piece_id, side)
+            else:
+                self.game.edit_remove_captured(piece_id, side)
+        except ValueError as e:
+            QMessageBox.warning(self, "削除失敗", str(e))
+            return
         self.refresh()
 
     def on_move_list_clicked(self, row: int) -> None:
@@ -1046,6 +1250,55 @@ class GungiWindow(QMainWindow):
             self.game.edit_clear_board()
             self._reset_selection()
             self.refresh()
+
+    def on_add_piece(self) -> None:
+        if not self.edit_mode:
+            return
+        dlg = AddPieceDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        if dlg.piece_type is None or dlg.color is None or dlg.target is None:
+            return
+        try:
+            if dlg.target == "hand":
+                self.game.edit_add_to_hand(dlg.piece_type, dlg.color)
+            else:
+                self.game.edit_add_captured(dlg.piece_type, dlg.color)
+        except ValueError as e:
+            QMessageBox.warning(self, "追加失敗", str(e))
+            return
+        self.refresh()
+
+    def on_panel_add(self, side: Side, source: str) -> None:
+        """各パネルの「+」ボタンが押されたとき。色と追加先はパネルに紐付く。"""
+        if not self.edit_mode:
+            return
+        side_label = "白" if side is Side.White else "黒"
+        list_label = "手駒" if source == "hand" else "捕獲駒"
+        dlg = SimpleAddDialog(self, f"{side_label}の{list_label}に追加")
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        if dlg.piece_type is None:
+            return
+        try:
+            if source == "hand":
+                self.game.edit_add_to_hand(dlg.piece_type, side)
+            else:
+                self.game.edit_add_captured(dlg.piece_type, side)
+        except ValueError as e:
+            QMessageBox.warning(self, "追加失敗", str(e))
+            return
+        self.refresh()
+
+    def on_toggle_phase(self) -> None:
+        if not self.edit_mode:
+            return
+        if self.game.phase is GamePhase.PLACEMENT:
+            self.game.edit_set_phase(GamePhase.PLAY)
+        else:
+            self.game.edit_set_phase(GamePhase.PLACEMENT)
+        self._reset_selection()
+        self.refresh()
 
     # ---- 内部処理 ----
 

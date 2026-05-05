@@ -498,6 +498,19 @@ class Game:
         self.turn = side
         self._snapshot_full_state(label="編集")
 
+    def edit_set_phase(self, phase: GamePhase) -> None:
+        """段階を強制的に切替 (検証なし、編集モード専用)。"""
+        self.phase = phase
+        # PLAY に移行するなら両者 placement_done を True に揃える
+        if phase is GamePhase.PLAY:
+            self._placement_done[Side.White] = True
+            self._placement_done[Side.Black] = True
+        elif phase is GamePhase.PLACEMENT:
+            # 布陣に戻すなら done フラグを解除
+            self._placement_done[Side.White] = False
+            self._placement_done[Side.Black] = False
+        self._snapshot_full_state(label=f"編集: 段階 → {phase.name}")
+
     def edit_add_to_hand(self, piece_type: PieceType, side: Side) -> None:
         self.hand[side].append(
             Piece(piece_type=piece_type, color=side, location=Loc.IN_HAND)
@@ -511,6 +524,21 @@ class Game:
                 self._snapshot_full_state(label="編集")
                 return
         raise ValueError(f"hand piece not found: {piece_id}")
+
+    def edit_add_captured(self, piece_type: PieceType, side: Side) -> None:
+        """side が取った駒として追加 (新で再利用可)。色は所持者 = side。"""
+        self.captured_by[side].append(
+            Piece(piece_type=piece_type, color=side, location=Loc.CAPTURED)
+        )
+        self._snapshot_full_state(label="編集")
+
+    def edit_remove_captured(self, piece_id: str, side: Side) -> None:
+        for p in self.captured_by[side]:
+            if p.id == piece_id:
+                self.captured_by[side].remove(p)
+                self._snapshot_full_state(label="編集")
+                return
+        raise ValueError(f"captured piece not found: {piece_id}")
 
     def _setup_initial(self) -> None:
         """難易度に応じた初期化。
