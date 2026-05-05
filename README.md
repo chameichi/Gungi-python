@@ -1,7 +1,6 @@
 # 軍議 with Python
 
-『HUNTER × HUNTER』に登場するボードゲーム「軍議 (Gungi)」を Python で実装する個人プロジェクト。
-ルール検証エンジン・PySide6 製 GUI・将来の AI エンジン用プロトコル (UGI) を含みます。
+漫画『HUNTER × HUNTER』に登場するボードゲーム「軍議」の Python 実装。
 
 ## 目次
 
@@ -11,7 +10,6 @@
 - [難易度モード](#難易度モード)
 - [操作](#操作)
 - [UGI プロトコル](#ugi-プロトコル)
-- [今後の予定](#今後の予定)
 
 ## 機能
 
@@ -143,14 +141,6 @@ USI に倣った Gungi 用プロトコル。詳細は `protocol.py` 冒頭の do
 
 GUI → エンジン: `ugi`, `isready`, `uginewgame`, `position`, `go`, `stop`, `setoption`, `quit`
 エンジン → GUI: `id`, `ugiok`, `readyok`, `option`, `info`, `bestmove`
-
-## 今後の予定
-
-- [ ] 各難易度の段別 movement テーブル充実 (現状 level 0 のみ実装、`_LEVEL_DELTA` に追記が必要)
-- [ ] 帥ツケ機構 (中級/上級の対局段階で帥の上ツケ/帥自身のツケを許可)
-- [ ] 謀の変身機構 (取った相手の駒の動きを借用)
-- [ ] サンプル AI エンジン (ランダム手 / 簡易ミニマックス)
-- [ ] エンジン-GUI を分離プロセス化 (subprocess + UGI で通信)
 
 ## 参照
 
