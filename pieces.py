@@ -1,178 +1,262 @@
-# This program is about pieces
-from enum import Enum
+"""軍議 (Gungi) の駒定義。
+
+座標規約:
+    盤面は (x, y) で表す。x は列 0..8、y は行 0..8。
+    白の陣は y = 0,1,2、黒の陣は y = 6,7,8。
+    白視点で +y 方向が相手陣 (= 前進方向)。
+    本モジュール内の全可動パターンは白視点 "+y = 前進" で定義し、
+    Piece.movement() の末尾で黒駒なら (dx, dy) -> (-dx, -dy) に反転する。
+
+ツケ (段積み) の表現:
+    Piece.level は 0..2。level=0 が 1段目 (地上)、level=2 が 3段目。
+    段が上がると可動域が変わるため _MOVE_TABLE[(piece_type, level)] で管理する。
+"""
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass, field
+from enum import Enum, auto
+
 
 class Side(Enum):
     White = 1
     Black = 2
 
-    
-class PieceType:
-    """
-    駒の種類を定義するクラス
-    """
-    Sui = "帥"
-    Boushou = "謀"
-    Ohdsutsu = "砲"
-    Tsutsu = "筒"
-    Taishou = "大"
-    Chujou = "中"
-    Shoushou = "小"
-    Shinobi = "忍"
-    Samurai = "侍"
-    Kiba = "馬"
-    Yumi = "弓"
-    Toride = "砦"
-    Yari = "槍"
-    Hyou = "兵"
+    def opponent(self) -> "Side":
+        return Side.Black if self is Side.White else Side.White
 
 
-class Pieces:
-    def __init__(self, color, name, x=-1, y=-1) -> None:
-        """
-         駒の基本情報を管理するクラス
-        :param color: 駒の色（例: Side.White または Side.Black）
-        :param name: 駒の名前（例: "King", "Queen", "Bishop" など）
-        :param x: 駒のx座標（0から8の整数）
-        :param y: 駒のy座標（0から8の整数）
-        """
-        self.color = color
-        self.name = name
-        self.x = x
-        self.y = y
-        self.rank = 0  # 駒のランク（初期値は0）
-        self.movelist = []
-
-    def get_movelist(self) -> list:
-        """
-        駒の移動方法を定義
-        :param color: 駒の色（例: Side.White または Side.Black）
-        :return: 移動可能な座標のリスト
-        """
-        raise NotImplementedError("This method should be overridden by subclasses")
-
-    def __str__(self) -> str:
-        """
-        駒の情報を文字列で表現（デバッグ用）
-        """
-        return f"{self.color} {self.name} at ({self.x}, {self.y})"
-    
-
-class Sui(Pieces):
-    def __init__(self, color, name):
-        super().__init__(color, name, x=-1, y=-1)
-        self.name = PieceType.Sui
-        if self.color == Side.White:
-            self.movelist = [
-                (dy, dx) for dx in range(-1, 2) for dy in range(-1, 2)
-                if not (dx == 0 and dy == 0)
-            ]
-        else:
-            self.movelist = [
-                (-dy, -dx) for dx in range(-1, 2) for dy in range(-1, 2)
-                if not (dx == 0 and dy == 0)
-            ]
-
-    def __str__(self) -> str:
-        return f"{self.color} {self.name} at ({self.x}, {self.y})"
-    
-    def get_movelist(self) -> list:
-        """
-        帥の移動方法を定義
-        :return: 移動可能な座標のリスト
-        """
-        move = self.movelist
-        if self.rank == 1:
-            # ツケ1のときは移動範囲を元のmoveからまわり8マスを拡大
-            move.extend([
-                (dy, dx) for dx in range(-2, 3, 2)
-                for dy in range(-2, 3, 2)
-                if (dx != 0 or dy != 0) \
-                    and (0 <= self.x + dx < 9) \
-                    and (0 <= self.y + dy < 9)
-            ])
-        elif self.rank == 2:
-            # ツケ2のときは移動範囲をツケ1のmoveからまわり8マスを拡大
-            move.extend([
-                (dy, dx) for dx in range(-3, 4, 3)
-                for dy in range(-3, 4, 3)
-                if (dx != 0 or dy != 0) \
-                    and (0 <= self.x + dx < 9) \
-                    and (0 <= self.y + dy < 9)
-            ])
-        else:
-            # ツケ3以上は違法
-            raise ValueError("Invalid rank for Sui piece")
-        # 黒番のときは移動方向を反転
-        if self.color == Side.Black:
-            move = [(-y, -x) for y, x in move]
-        return move
-    
-    def update_movelist(self) -> None:
-        """
-        get_movelistを呼び出し、駒の移動可能方向を更新
-        """
-        self.movelist += self.get_movelist()
+class PieceType(Enum):
+    SUI = auto()
+    TAISHO = auto()
+    CHUJO = auto()
+    SHOUSHO = auto()
+    SAMURAI = auto()
+    YARI = auto()
+    KIBA = auto()
+    SHINOBI = auto()
+    TORIDE = auto()
+    HYOU = auto()
+    YUMI = auto()
+    TSUTSU = auto()
+    OHDSUTSU = auto()
+    BOUSHO = auto()
 
 
-class Hyou(Pieces):
-    def __init__(self, color, name):
-        super().__init__(color, name, x=-1, y=-1)
-        self.name = PieceType.Hyou
-        if self.color == Side.White:
-            self.movelist = [
-                (dy, 0) for dy in range(-1, 2)
-                if dy != 0
-            ]
-        else:
-            self.movelist = [
-                (-dy, 0) for dy in range(-1, 2)
-                if dy != 0
-            ]
+PIECES_NAME: dict[PieceType, str] = {
+    PieceType.SUI: "帥",
+    PieceType.TAISHO: "大",
+    PieceType.CHUJO: "中",
+    PieceType.SHOUSHO: "小",
+    PieceType.SAMURAI: "侍",
+    PieceType.YARI: "槍",
+    PieceType.KIBA: "馬",
+    PieceType.SHINOBI: "忍",
+    PieceType.TORIDE: "砦",
+    PieceType.HYOU: "兵",
+    PieceType.YUMI: "弓",
+    PieceType.TSUTSU: "筒",
+    PieceType.OHDSUTSU: "砲",
+    PieceType.BOUSHO: "謀",
+}
 
-    def __str__(self) -> str:
-        return f"{self.color} {self.name} at ({self.x}, {self.y})"
-    
-    def get_movelist(self) -> list:
-        """
-        帥の移動方法を定義
-        :return: 移動可能な座標のリスト
-        """
-        move = self.movelist
-        if self.rank == 1:
-            # ツケ1のときは移動範囲を元のmoveから前後2マスを拡大
-            move.extend([
-                (dy, 0) for dy in range(-2, 3, 2)
-                if (0 <= self.y + dy < 9) \
-                    and (0 <= self.x < 9) \
-                    and dy != 0
-            ])
-        elif self.rank == 2:
-            # ツケ2のときは移動範囲をツケ1のmoveから更に前後2マスを拡大
-            move.extend([
-                (dy, 0) for dy in range(-3, 4, 3)
-                if (0 <= self.y + dy < 9) \
-                    and (0 <= self.x < 9) \
-                    and dy != 0
-            ])
-        else:
-            # ツケ3以上は違法
-            raise ValueError("Invalid rank for Sui piece")
-        # 黒番のときは移動方向を反転
-        if self.color == Side.Black:
-            move = [(-y, -x) for y, x in move]
-        return move
-    
-    def update_movelist(self) -> None:
-        """
-        get_movelistを呼び出し、駒の移動可能方向を更新
-        """
-        self.movelist += self.get_movelist()
+PIECE_COUNTS: dict[PieceType, int] = {
+    PieceType.SUI: 1,
+    PieceType.TAISHO: 1,
+    PieceType.CHUJO: 1,
+    PieceType.SHOUSHO: 2,
+    PieceType.SAMURAI: 2,
+    PieceType.YARI: 3,
+    PieceType.KIBA: 2,
+    PieceType.SHINOBI: 2,
+    PieceType.TORIDE: 2,
+    PieceType.HYOU: 4,
+    PieceType.YUMI: 2,
+    PieceType.TSUTSU: 1,
+    PieceType.OHDSUTSU: 1,
+    PieceType.BOUSHO: 1,
+}
 
 
-if __name__ == "__main__":
-    # Example usage
-    sui = Sui(Side.White, PieceType.Sui)
-    print(sui)  # Output: Side.White PieceType.Sui at (0, 0)
-    
-    piece2 = Pieces(Side.Black, PieceType.Boushou)
-    print(piece2)  # Output: Side.Black PieceType.Boushou at (1, 1)
+class DifficultyLevel(Enum):
+    INTRODUCTORY = auto()  # 入門編: 初期配置①, 特殊駒なし, ツケ2段, 帥ツケ無
+    BEGINNER = auto()      # 初級編: 初期配置②, 弓のみ, ツケ2段, 帥ツケ無
+    INTERMEDIATE = auto()  # 中級編: 自由配置, 全特殊駒, ツケ2段, 帥ツケ有
+    ADVANCED = auto()      # 上級編: 自由配置, 全特殊駒, ツケ3段, 帥ツケ有
+
+
+class Loc(Enum):
+    IN_HAND = auto()   # 手駒 (初期配置で未使用の予備)
+    ON_BOARD = auto()  # 盤上
+    CAPTURED = auto()  # 相手に取られ、取った側の「新」用プールへ
+    DEAD = auto()      # 死に駒 (再使用不可)
+
+
+class MoveType(Enum):
+    LINE = auto()  # 走り: 途中に駒があれば遮断
+    JUMP = auto()  # 跳び: 途中に駒があっても飛び越える
+    STEP = auto()  # 1歩: 指定マスに直接移動
+
+
+@dataclass(frozen=True)
+class MovePattern:
+    move_type: MoveType
+    dx: int
+    dy: int
+    limit: int | None = None  # None なら無制限 (LINE のみ意味を持つ)
+
+
+MAX_LEVEL = 2  # ツケは最大 3段 (level 0,1,2)
+
+
+# ---------------------------------------------------------------------------
+# 駒種 × 段数 の可動パターン表
+# ---------------------------------------------------------------------------
+# 全て白視点 +y = 前進。黒は Piece.movement() で反転する。
+# level 1,2 (2段目,3段目) の正確なパターンはルールブック page 8「駒の動き方早見表」
+# に全駒分のグリッドがある。以下では level 0 を正確に実装し、
+# level 1,2 は level 0 に追加移動を差分で与える形を採る。
+# 差分の中身は早見表から順次埋める前提で _LEVEL_DELTA に集約している。
+# ---------------------------------------------------------------------------
+
+_MOVE_TABLE: dict[tuple[PieceType, int], list[MovePattern]] = {}
+
+
+def _step(deltas: list[tuple[int, int]]) -> list[MovePattern]:
+    return [MovePattern(MoveType.STEP, dx, dy) for dx, dy in deltas]
+
+
+def _line(deltas: list[tuple[int, int]], limit: int | None = None) -> list[MovePattern]:
+    return [MovePattern(MoveType.LINE, dx, dy, limit) for dx, dy in deltas]
+
+
+def _jump(deltas: list[tuple[int, int]]) -> list[MovePattern]:
+    return [MovePattern(MoveType.JUMP, dx, dy) for dx, dy in deltas]
+
+
+# 帥 (SUI): 周囲8方向 1歩。帥はツケ不可につき level 1,2 は参照されない想定だが安全に同値。
+_SUI = _step([(-1, -1), (0, -1), (1, -1),
+              (-1, 0),           (1, 0),
+              (-1, 1),  (0, 1),  (1, 1)])
+
+# 大 (TAISHO): 前後左右 無制限 + 斜め 1歩
+_TAISHO = _line([(1, 0), (-1, 0), (0, 1), (0, -1)]) + \
+          _step([(-1, -1), (1, -1), (-1, 1), (1, 1)])
+
+# 中 (CHUJO): 斜め 無制限 + 縦横 1歩
+_CHUJO = _line([(-1, -1), (1, -1), (-1, 1), (1, 1)]) + \
+         _step([(0, -1), (0, 1), (-1, 0), (1, 0)])
+
+# 小 (SHOUSHO): 前3斜 + 左右 + 後1
+_SHOUSHO = _step([(-1, 1), (0, 1), (1, 1),
+                  (-1, 0),         (1, 0),
+                           (0, -1)])
+
+# 侍 (SAMURAI): 前3斜 + 後1
+_SAMURAI = _step([(-1, 1), (0, 1), (1, 1), (0, -1)])
+
+# 槍 (YARI): 前2走り + 斜前1 + 後1
+_YARI = _line([(0, 1)], limit=2) + _step([(-1, 1), (1, 1), (0, -1)])
+
+# 馬 (KIBA): 縦横 2歩走り。要検証 (page 8)。
+_KIBA = _line([(0, 1), (0, -1), (1, 0), (-1, 0)], limit=2)
+
+# 忍 (SHINOBI): 斜め 2歩走り
+_SHINOBI = _line([(-1, -1), (1, -1), (-1, 1), (1, 1)], limit=2)
+
+# 砦 (TORIDE): 前 + 斜前 + 左右
+_TORIDE = _step([(0, 1), (-1, 1), (1, 1), (-1, 0), (1, 0)])
+
+# 兵 (HYOU): 前1 のみ
+_HYOU = _step([(0, 1)])
+
+# 弓 (YUMI): 前2跳び3方向 + 後1
+_YUMI = _jump([(-1, 2), (0, 2), (1, 2)]) + _step([(0, -1)])
+
+# 筒 (TSUTSU): 前2跳び + 斜後2方向
+_TSUTSU = _jump([(0, 2)]) + _step([(-1, -1), (1, -1)])
+
+# 砲 (OHDSUTSU): 前2跳び + 左右 + 後1
+_OHDSUTSU = _jump([(0, 2)]) + _step([(-1, 0), (1, 0), (0, -1)])
+
+# 謀 (BOUSHO): ベースは 斜前2 + 後1。Piece.transform_as が設定されていればその駒種の動きも加算。
+_BOUSHO = _step([(-1, 1), (1, 1), (0, -1)])
+
+
+_BASE_PATTERNS: dict[PieceType, list[MovePattern]] = {
+    PieceType.SUI: _SUI,
+    PieceType.TAISHO: _TAISHO,
+    PieceType.CHUJO: _CHUJO,
+    PieceType.SHOUSHO: _SHOUSHO,
+    PieceType.SAMURAI: _SAMURAI,
+    PieceType.YARI: _YARI,
+    PieceType.KIBA: _KIBA,
+    PieceType.SHINOBI: _SHINOBI,
+    PieceType.TORIDE: _TORIDE,
+    PieceType.HYOU: _HYOU,
+    PieceType.YUMI: _YUMI,
+    PieceType.TSUTSU: _TSUTSU,
+    PieceType.OHDSUTSU: _OHDSUTSU,
+    PieceType.BOUSHO: _BOUSHO,
+}
+
+# level 1,2 での追加パターン。空なら level 0 と同じ動き。
+# ルールブック page 8 の早見表から順次埋める想定 (TODO)。
+_LEVEL_DELTA: dict[tuple[PieceType, int], list[MovePattern]] = {
+    # 例: (PieceType.HYOU, 1): _step([(-1, 1), (1, 1)]),  # ツケ1で斜前が加わる等
+}
+
+
+def _build_move_table() -> None:
+    for pt, base in _BASE_PATTERNS.items():
+        for level in range(MAX_LEVEL + 1):
+            delta = _LEVEL_DELTA.get((pt, level), [])
+            _MOVE_TABLE[(pt, level)] = list(base) + list(delta)
+
+
+_build_move_table()
+
+
+def _mirror(pats: list[MovePattern]) -> list[MovePattern]:
+    return [MovePattern(p.move_type, -p.dx, -p.dy, p.limit) for p in pats]
+
+
+# ---------------------------------------------------------------------------
+# Piece
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Piece:
+    piece_type: PieceType
+    color: Side
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    location: Loc = Loc.IN_HAND
+    level: int = 0
+    transform_as: PieceType | None = None  # 謀の変身対象 (相手に取られた駒の種類)
+
+    @property
+    def kanji(self) -> str:
+        return PIECES_NAME[self.piece_type]
+
+    def movement(self) -> list[MovePattern]:
+        if not 0 <= self.level <= MAX_LEVEL:
+            raise ValueError(f"invalid level: {self.level}")
+        pats = list(_MOVE_TABLE[(self.piece_type, self.level)])
+        if self.piece_type is PieceType.BOUSHO and self.transform_as is not None:
+            pats.extend(_MOVE_TABLE[(self.transform_as, self.level)])
+        if self.color is Side.Black:
+            pats = _mirror(pats)
+        return pats
+
+    def can_be_stacked(self) -> bool:
+        """この駒の上にツケ (stack) できるか。帥の上には置けない。"""
+        return self.piece_type is not PieceType.SUI
+
+    def can_stack_self(self) -> bool:
+        """この駒自身をツケる (= 段を上げる) ことが許されるか。帥はツケ不可。"""
+        return self.piece_type is not PieceType.SUI
+
+    def __repr__(self) -> str:
+        tag = self.color.name[0] + self.kanji
+        return f"{tag}(L{self.level})"
