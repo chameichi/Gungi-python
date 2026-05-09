@@ -79,6 +79,16 @@ class Board:
 
         if pat.move_type is MoveType.JUMP:
             nx, ny = x + pat.dx, y + pat.dy
+            # 障害駒のレベル制限 (page 5): 飛び越えられるのは「自分の段以下」の駒のみ。
+            # 経路上 (始点と終点を除く) のスタック最上段が自分のレベルより高い場合は不可。
+            base_d = max(abs(pat.dx), abs(pat.dy)) or 1
+            ux = pat.dx // base_d
+            uy = pat.dy // base_d
+            for i in range(1, base_d):
+                ix, iy = x + ux * i, y + uy * i
+                top = self.top_piece(ix, iy)
+                if top is not None and top.level > piece.level:
+                    return []
             return [(nx, ny)] if self._can_land_on(nx, ny, piece) else []
 
         # LINE: 途中に駒があれば遮断
@@ -170,8 +180,8 @@ class Board:
     ) -> None:
         """src の最上段駒を dst の最上段に「ツケ」として乗せる。
 
-        dst のスタックが 3段 未満で、最上段が帥でなく、自駒でも敵駒でも可。
-        mover 自身が 帥 の場合は不可。
+        段数上限と空マス禁止のみ Board 層で判定する。
+        帥ツケ可否は難易度依存ルールのため Game 層で事前検証する前提。
         """
         sx, sy = src
         dx, dy = dst
@@ -182,16 +192,11 @@ class Board:
             raise ValueError(f"dest out of bounds: {dst}")
 
         mover = src_stack[-1]
-        if not mover.can_stack_self():
-            raise ValueError("帥は自らツケられない")
-
         dst_stack = self.stack_at(dx, dy)
         if not dst_stack:
             raise ValueError("cannot stack on empty square (use move_top)")
         if len(dst_stack) >= MAX_STACK_HEIGHT:
             raise ValueError("stack already at max height (3)")
-        if not dst_stack[-1].can_be_stacked():
-            raise ValueError("帥の上にはツケできない")
 
         src_stack.pop()
         if not src_stack:
@@ -202,28 +207,34 @@ class Board:
     def drop_from_hand(self, piece: Piece, dst: tuple[int, int]) -> None:
         """手駒または捕獲駒を盤上に「新 (あらた)」として打つ。
 
-        制約 (ルールブック p.5):
-          - 3段目 (level=2) への新ツケ不可
-          - 帥の上に新ツケ不可
-          - 自駒の上に新ツケ不可
+        制約 (ルールブック page 11):
+          - 3段にはツケられない (level=2 着地不可)
+          - 帥にツケることはできない
+          - 相手駒の上に新でツケられない (自駒のみ)
           - 帥そのものは新で打てない
+          - 行きどころのない駒の禁止 (慣習): 兵は最前段に新できない
+            (前進1のみで永久に動けなくなるため)
         """
         dx, dy = dst
         if not self.in_bounds(dx, dy):
             raise ValueError(f"dest out of bounds: {dst}")
         if piece.piece_type is PieceType.SUI:
             raise ValueError("帥は新で打てない")
+        if piece.piece_type is PieceType.HYOU:
+            last_rank = self.height - 1 if piece.color is Side.White else 0
+            if dy == last_rank:
+                raise ValueError("兵は最前段に新できない (動けなくなる)")
 
         dst_stack = self.grid.setdefault((dx, dy), [])
         resulting_level = len(dst_stack)
         if resulting_level >= 2:
-            raise ValueError("新で3段目には置けない")
+            raise ValueError("3段にはツケられない")
         if dst_stack:
             top = dst_stack[-1]
-            if top.color is piece.color:
-                raise ValueError("自駒の上に新は置けない")
-            if not top.can_be_stacked():
-                raise ValueError("帥の上に新は置けない")
+            if top.color is not piece.color:
+                raise ValueError("相手駒の上に新でツケられない")
+            if top.piece_type is PieceType.SUI:
+                raise ValueError("帥にツケることはできない")
 
         piece.level = resulting_level
         piece.location = Loc.ON_BOARD

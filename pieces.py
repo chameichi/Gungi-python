@@ -158,7 +158,7 @@ _SAMURAI = _step([(-1, 1), (0, 1), (1, 1), (0, -1)])
 # 槍 (YARI): 前2走り + 斜前1 + 後1
 _YARI = _line([(0, 1)], limit=2) + _step([(-1, 1), (1, 1), (0, -1)])
 
-# 馬 (KIBA): 縦横 2歩走り。要検証 (page 8)。
+# 馬 (KIBA): 縦横 2歩走り (page 15 早見表で確認済)
 _KIBA = _line([(0, 1), (0, -1), (1, 0), (-1, 0)], limit=2)
 
 # 忍 (SHINOBI): 斜め 2歩走り
@@ -170,14 +170,14 @@ _TORIDE = _step([(0, 1), (-1, 1), (1, 1), (-1, 0), (1, 0)])
 # 兵 (HYOU): 前1 のみ
 _HYOU = _step([(0, 1)])
 
-# 弓 (YUMI): 前2跳び3方向 + 後1
+# 弓 (YUMI): 前2マス目跳び3方向 + 後1。飛距離は段で伸びない (前1マスのみ飛越)
 _YUMI = _jump([(-1, 2), (0, 2), (1, 2)]) + _step([(0, -1)])
 
-# 筒 (TSUTSU): 前2跳び + 斜後2方向
+# 筒 (TSUTSU): 前2マス目跳び + 斜後1。段で飛距離 +1
 _TSUTSU = _jump([(0, 2)]) + _step([(-1, -1), (1, -1)])
 
-# 砲 (OHDSUTSU): 前2跳び + 左右 + 後1
-_OHDSUTSU = _jump([(0, 2)]) + _step([(-1, 0), (1, 0), (0, -1)])
+# 砲 (OHDSUTSU): 前3マス目跳び + 左右 + 後1。段で飛距離 +1 (page 5: 1段で「前方2マスを飛ばして3マス目」)
+_OHDSUTSU = _jump([(0, 3)]) + _step([(-1, 0), (1, 0), (0, -1)])
 
 # 謀 (BOUSHO): ベースは 斜前2 + 後1。Piece.transform_as が設定されていればその駒種の動きも加算。
 _BOUSHO = _step([(-1, 1), (1, 1), (0, -1)])
@@ -200,18 +200,54 @@ _BASE_PATTERNS: dict[PieceType, list[MovePattern]] = {
     PieceType.BOUSHO: _BOUSHO,
 }
 
-# level 1,2 での追加パターン。空なら level 0 と同じ動き。
-# ルールブック page 8 の早見表から順次埋める想定 (TODO)。
-_LEVEL_DELTA: dict[tuple[PieceType, int], list[MovePattern]] = {
-    # 例: (PieceType.HYOU, 1): _step([(-1, 1), (1, 1)]),  # ツケ1で斜前が加わる等
-}
+# 段数による移動範囲の変化 (ルールブック page 8 + page 15 早見表):
+# - STEP 1マス → level k では「同方向に最大 (1+k) マスの 走り」(LINE 化)
+# - LINE 走り (limit L) → level k では limit が (L+k) に伸びる (None=無制限なら不変)
+# - JUMP (弓・筒・砲) → level k では飛距離が (base+k) マスに伸びる (page 12)
+def _patterns_for_level(
+    piece_type: PieceType, level: int
+) -> list[MovePattern]:
+    out: list[MovePattern] = []
+    for pat in _BASE_PATTERNS[piece_type]:
+        if pat.move_type is MoveType.STEP:
+            if level == 0:
+                out.append(pat)
+            else:
+                # 同方向に (1+level) マスの走り
+                base_d = max(abs(pat.dx), abs(pat.dy))
+                ux = pat.dx // base_d
+                uy = pat.dy // base_d
+                out.append(
+                    MovePattern(MoveType.LINE, ux, uy, 1 + level)
+                )
+        elif pat.move_type is MoveType.LINE:
+            new_limit = (
+                pat.limit + level if pat.limit is not None else None
+            )
+            out.append(
+                MovePattern(MoveType.LINE, pat.dx, pat.dy, new_limit)
+            )
+        elif pat.move_type is MoveType.JUMP:
+            # 弓は段に関わらず飛距離固定 (前1マスのみ飛越; ユーザ確認済)
+            extend = 0 if piece_type is PieceType.YUMI else level
+            if extend == 0:
+                out.append(pat)
+            else:
+                # 砲・筒は前方軸 (dx=0) のみなので単純スカラー拡張で OK
+                base_d = max(abs(pat.dx), abs(pat.dy))
+                ux = pat.dx // base_d if base_d else 0
+                uy = pat.dy // base_d if base_d else 0
+                new_d = base_d + extend
+                out.append(
+                    MovePattern(MoveType.JUMP, ux * new_d, uy * new_d)
+                )
+    return out
 
 
 def _build_move_table() -> None:
-    for pt, base in _BASE_PATTERNS.items():
+    for pt in _BASE_PATTERNS:
         for level in range(MAX_LEVEL + 1):
-            delta = _LEVEL_DELTA.get((pt, level), [])
-            _MOVE_TABLE[(pt, level)] = list(base) + list(delta)
+            _MOVE_TABLE[(pt, level)] = _patterns_for_level(pt, level)
 
 
 _build_move_table()
@@ -250,12 +286,14 @@ class Piece:
         return pats
 
     def can_be_stacked(self) -> bool:
-        """この駒の上にツケ (stack) できるか。帥の上には置けない。"""
-        return self.piece_type is not PieceType.SUI
+        """この駒の上にツケ (stack) できるか。
+        帥ツケ可否は難易度依存なので Game 層で別途判定する (常に True を返す)。"""
+        return True
 
     def can_stack_self(self) -> bool:
-        """この駒自身をツケる (= 段を上げる) ことが許されるか。帥はツケ不可。"""
-        return self.piece_type is not PieceType.SUI
+        """この駒自身をツケる (= 段を上げる) ことが許されるか。
+        帥ツケ可否は難易度依存なので Game 層で別途判定する (常に True を返す)。"""
+        return True
 
     def __repr__(self) -> str:
         tag = self.color.name[0] + self.kanji

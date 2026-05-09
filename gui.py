@@ -1037,8 +1037,19 @@ class GungiWindow(QMainWindow):
             )
             return
         if self.game.winner is not None:
+            cause = (
+                "詰み" if self.game.phase is GamePhase.FINISHED
+                and self.game.board.find_sui(self.game.winner.opponent()) is not None
+                else "帥捕獲"
+            )
             self.statusBar().showMessage(
-                f"勝者: {self._turn_label(self.game.winner)} (帥捕獲)"
+                f"勝者: {self._turn_label(self.game.winner)} ({cause})"
+            )
+            return
+        if self.game.phase is GamePhase.FINISHED:
+            # 千日手による終局 (page 13: 再勝負)
+            self.statusBar().showMessage(
+                "千日手で終局しました (再勝負) — 「新規対局」を選択してください"
             )
             return
         n_legal = len(self.game.legal_actions())
@@ -1197,6 +1208,24 @@ class GungiWindow(QMainWindow):
     def on_finish_placement(self) -> None:
         if self.game.phase is not GamePhase.PLACEMENT:
             return
+        # 自滅手チェック: 自陣の駒数が極端に少ない場合は確認ダイアログを出す
+        own_pieces = self.game._count_own_pieces_on_board(self.game.turn)
+        if own_pieces < 5:
+            side_label = self._turn_label(self.game.turn)
+            confirm = QMessageBox(self)
+            confirm.setIcon(QMessageBox.Icon.Warning)
+            confirm.setWindowTitle("配置完了の確認")
+            confirm.setText(
+                f"{side_label}の自陣の駒は {own_pieces} 枚しかありません。\n"
+                "このまま配置完了しますか？\n"
+                "(配置完了後は布陣段階に戻れません)"
+            )
+            confirm.setStandardButtons(
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            confirm.setDefaultButton(QMessageBox.StandardButton.No)
+            if confirm.exec() != QMessageBox.StandardButton.Yes:
+                return
         try:
             self.game.finish_placement()
         except ValueError as e:
