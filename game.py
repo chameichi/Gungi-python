@@ -87,10 +87,6 @@ class GameConfig:
             DifficultyLevel.INTRODUCTORY, DifficultyLevel.BEGINNER,
         }
 
-    @property
-    def allow_transform(self) -> bool:
-        return self.difficulty is DifficultyLevel.ADVANCED
-
 
 # ---------------------------------------------------------------------------
 # 初期配置
@@ -216,6 +212,7 @@ class Game:
     _snapshots: list[dict[str, Any]] = field(default_factory=list, repr=False)
     _snap_labels: list[str] = field(default_factory=list, repr=False)
     _cursor: int = 0  # _snapshots 上の現在位置
+    _simulating: bool = field(default=False, repr=False)  # is_checkmate の再帰防止
 
     def __post_init__(self) -> None:
         if not self.board.grid:
@@ -335,9 +332,11 @@ class Game:
         if not self.in_own_territory(self.turn, y):
             raise ValueError("自陣にしか置けません")
 
-        # 帥から配置するルール
+        # 帥から配置するルール (page 6: 「帥から1駒ずつ自陣3行目までに配置」)
+        # 帥が未配置のまま他駒を置くのを禁止。編集モードで一旦盤上に駒があっても、
+        # 帥そのものが未配置なら強制的に帥を先に置かせる。
         if (
-            self._count_own_pieces_on_board(self.turn) == 0
+            self.board.find_sui(self.turn) is None
             and piece.piece_type is not PieceType.SUI
         ):
             raise ValueError("最初の配置は帥から行ってください")
@@ -350,13 +349,17 @@ class Game:
         top = self.board.top_piece(x, y)
         if top is not None and top.color is not self.turn:
             raise ValueError("自駒の上にしか積めません")
-        if top is not None and not top.can_be_stacked():
-            raise ValueError("帥の上には積めません")
-        if piece.piece_type is PieceType.SUI and h > 0:
-            raise ValueError("帥は1段目にのみ置けます")
+        # 帥ツケ可否は難易度依存 (page 14: 中級・上級のみ可)
+        if top is not None and top.piece_type is PieceType.SUI \
+                and not self.config.allow_sui_stack:
+            raise ValueError("この難易度では帥の上には積めません")
+        if piece.piece_type is PieceType.SUI and h > 0 \
+                and not self.config.allow_sui_stack:
+            raise ValueError("この難易度では帥は1段目にのみ置けます")
 
         self.hand[self.turn].remove(piece)
         self.board.place_initial(piece, x, y)
+        self._update_bousho_transforms()
         side_mark = "▲" if self.turn is Side.White else "△"
         label = f"{side_mark}{piece.kanji} 布陣→({x},{y})"
         # 相手が完了済みでなければ手番交代 (一手ごとに交互)
@@ -418,7 +421,46 @@ class Game:
         self._placement_done[Side.Black] = True
         self.phase = GamePhase.PLAY
         self.turn = Side.White
+        # 対局開始局面を千日手検出用ヒストリに登録 (PLACEMENT 経由でも漏らさない)
+        self._record_snapshot()
         self._snapshot_full_state(label="後手 配置完了 / 対局開始")
+
+    def _update_bousho_transforms(self) -> None:
+        """謀の寝返り (page 13): 真下が敵駒なら、その駒種の動きを獲得する。
+        スタックが解けたり真下が変わったりするたびに同期する必要があるので、
+        盤面を変える操作のあとに呼ぶ。
+        多段ツケた状態 (謀が level=1 / 2) でも同じく真下のみを参照する仕様。"""
+        for stack in self.board.grid.values():
+            for i, p in enumerate(stack):
+                if p.piece_type is not PieceType.BOUSHO:
+                    continue
+                if i > 0 and stack[i - 1].color is not p.color:
+                    p.transform_as = stack[i - 1].piece_type
+                else:
+                    p.transform_as = None
+
+    def is_checkmate(self) -> bool:
+        """詰み (page 13): 現手番のどの合法手を指しても、次手で帥が取られる場合 True。
+        合法手が一つも無い場合も True (動けない=帥を守れない)。"""
+        if self.phase is not GamePhase.PLAY:
+            return False
+        if self.winner is not None:
+            return False
+        side = self.turn
+        legal = self.legal_actions()
+        if not legal:
+            return True
+        for action in legal:
+            sim = copy.deepcopy(self)
+            # 再帰回避: シミュレーション中は is_checkmate / is_sennichite を呼ばない
+            sim._simulating = True
+            try:
+                sim.apply(action)
+            except Exception:
+                continue
+            if not sim.is_sui_attacked(side):
+                return False
+        return True
 
     def is_sui_attacked(self, side: Side) -> bool:
         """side の帥が、相手駒の最上段から取られる位置にあるか。"""
@@ -474,6 +516,7 @@ class Game:
             raise ValueError("stack already at max height")
         piece = Piece(piece_type=piece_type, color=color)
         self.board.place_initial(piece, x, y)
+        self._update_bousho_transforms()
         self.winner = None
         self._snapshot_full_state(label="編集")
 
@@ -484,6 +527,7 @@ class Game:
         stack.pop()
         if not stack:
             del self.board.grid[(x, y)]
+        self._update_bousho_transforms()
         self.winner = None
         self._snapshot_full_state(label="編集")
 
@@ -643,12 +687,22 @@ class Game:
         else:
             raise ValueError(f"unknown action: {action.type}")
 
+        self._update_bousho_transforms()
         self.move_count += 1
         self._check_win()
         if self.winner is None:
             self.turn = self.turn.opponent()
-            self._record_snapshot()
-        self._snapshot_full_state(label=self._describe_action(action, kanji, side_mark))
+            if not self._simulating:
+                self._record_snapshot()
+                # 千日手 (page 13): 同一局面 4 回で再勝負。winner=None のまま終局
+                if self.is_sennichite():
+                    self.phase = GamePhase.FINISHED
+                elif self.is_checkmate():
+                    # 詰み (page 13): 詰みになった側の相手が勝者
+                    self.winner = self.turn.opponent()
+                    self.phase = GamePhase.FINISHED
+        if not self._simulating:
+            self._snapshot_full_state(label=self._describe_action(action, kanji, side_mark))
 
     def _lookup_kanji(self, action: Action) -> str:
         from pieces import PIECES_NAME
@@ -696,19 +750,23 @@ class Game:
         if action.src is None:
             raise ValueError("STACK requires src")
         piece = self._require_own_top(action.src)
-        # stack_on_top は「src の最上段駒を dst の最上段に乗せる」。
-        # 移動可能マスに制限はあるか? → 公式は「ツケは1歩の範囲で」という解釈もあれば
-        # 「可動範囲内なら任意」という解釈もある。ここでは後者を採り、
-        # destinations_from() で通常移動可動なマスを集合として利用する。
-        # ただし destinations_from は自駒最上段を除外するので、
-        # 自駒/敵駒いずれの最上段にもツケるために「ベクトル同一で top が自駒」も許容する。
-        _ = piece
+        # ツケ先は「その駒の通常可動範囲内」(page 8: 駒は移動範囲のあるマスへツケ可能)。
+        # destinations_from() は自駒最上段を除外するので、自駒の上にツケるケースを補うため
+        # _reachable_allowing_own() の結果も合わせて可動先集合を作る。
         dests = set(self.board.destinations_from(*action.src))
         # 自駒最上段でツケたいマスを補う
         for d in self._reachable_allowing_own(action.src):
             dests.add(d)
         if action.dst not in dests:
             raise ValueError(f"illegal stack dest: {action.dst}")
+
+        # 帥ツケ可否 (page 14): 中級・上級のみ可
+        top = self.board.top_piece(*action.dst)
+        if not self.config.allow_sui_stack:
+            if piece.piece_type is PieceType.SUI:
+                raise ValueError("この難易度では帥はツケできません")
+            if top is not None and top.piece_type is PieceType.SUI:
+                raise ValueError("この難易度では帥の上にはツケできません")
 
         current_level_max = self.config.max_level
         target_after = self.board.height_at(*action.dst)  # 積んだ後の新しい level
@@ -796,28 +854,38 @@ class Game:
                 if self.board.height_at(*dst) > self.config.max_level:
                     continue
                 top = self.board.top_piece(*dst)
-                if top is not None and not top.can_be_stacked():
-                    continue
-                if not stack[-1].can_stack_self():
-                    continue
+                # 帥ツケ可否 (page 14): 中級・上級のみ可
+                if not self.config.allow_sui_stack:
+                    if stack[-1].piece_type is PieceType.SUI:
+                        continue
+                    if top is not None and top.piece_type is PieceType.SUI:
+                        continue
                 acts.append(Action(ActionType.STACK, src=src, dst=dst))
         if self.config.allow_arata:
             pool = self.hand[self.turn] + self.captured_by[self.turn]
             for piece in pool:
                 if piece.piece_type is PieceType.SUI:
                     continue
+                # 行きどころのない駒禁止: 兵は最前段に新できない
+                hyou_last_rank = (
+                    self.board.height - 1
+                    if piece.color is Side.White else 0
+                )
                 for y in range(self.board.height):
+                    if piece.piece_type is PieceType.HYOU and y == hyou_last_rank:
+                        continue
                     for x in range(self.board.width):
                         dst = (x, y)
                         try:
                             # 実 apply なしで事前検証するのは面倒なので
-                            # 盤面制約だけラフに確認
+                            # 盤面制約だけラフに確認 (新は page 11: 自駒のみ・3段不可・帥不可)
                             h = self.board.height_at(*dst)
                             if h >= 2:
                                 continue
                             top = self.board.top_piece(*dst)
                             if top is not None and (
-                                top.color is piece.color or not top.can_be_stacked()
+                                top.color is not piece.color
+                                or top.piece_type is PieceType.SUI
                             ):
                                 continue
                             acts.append(Action(ActionType.ARATA, dst=dst, hand_piece_id=piece.id))
