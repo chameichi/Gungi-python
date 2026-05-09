@@ -46,7 +46,7 @@
 ================================================================
 4. GFEN (Gungi Forsyth-Edwards Notation)
 ================================================================
-    <board> <turn> <phase> <hand_w> <hand_b> <cap_w> <cap_b> <done_w> <done_b> <ply>
+    <board> <turn> <phase> <hand_w> <hand_b> <cap_w> <cap_b> <done_w> <done_b> <ply> <diff>
 
     board: 9 段 (y=8 から y=0) を '/' で区切る。各段は 9 マスを '|' 区切り。
         マスが空: 連続空きマス数 (1..9)
@@ -60,13 +60,16 @@
     cap_w/cap_b : 同上
     done_w/done_b: 0 | 1
     ply: 整数
+    diff: intro | beginner | intermediate | advanced (v2 で追加)
+        旧仕様 (10 フィールド) もデコード時は受理する。
 
     特殊形:
       startpos:intro          入門編 (初期配置①)
       startpos:beginner       初級編 (初期配置②)
       startpos:intermediate   中級編 (空盤 PLACEMENT)
       startpos:advanced       上級編 (空盤 PLACEMENT)
-      startpos                = startpos:intro
+      startpos                難易度未指定 (setoption Difficulty が
+                              先行していればそれを使用、なければ intro)
 
 ================================================================
 5. UGI コマンド
@@ -76,10 +79,13 @@
       isready                 準備確認
       uginewgame              新規対局通知
       position <spec> [moves <m1> <m2> ...]
-                              spec = startpos[:diff] | gfen <gfen10fields>
+                              spec = startpos[:diff] | gfen <gfen 10/11 fields>
       go [movetime <ms>] [depth <n>] [nodes <n>] [infinite]
       stop                    思考停止 (現時点の最善手を返す)
       setoption name <k> value <v>
+        標準オプション:
+          Difficulty: intro|beginner|intermediate|advanced
+            次の uginewgame / position startpos (難易度未指定) に適用
       ponderhit
       quit
 
@@ -164,6 +170,9 @@ DIFFICULTY_CODE: dict[str, DifficultyLevel] = {
     "beginner": DifficultyLevel.BEGINNER,
     "intermediate": DifficultyLevel.INTERMEDIATE,
     "advanced": DifficultyLevel.ADVANCED,
+}
+CODE_DIFFICULTY: dict[DifficultyLevel, str] = {
+    v: k for k, v in DIFFICULTY_CODE.items()
 }
 
 
@@ -259,7 +268,9 @@ def _parse_piece_list(
 
 
 def encode_gfen(game: Game) -> str:
-    """Game の現状態を GFEN 文字列に。"""
+    """Game の現状態を GFEN 文字列に (11 フィールド)。
+    末尾の難易度フィールドは v2 で追加された。
+    旧仕様 (10 フィールド) を扱うデコーダとも互換。"""
     parts = [
         encode_board(game.board),
         SIDE_CODE[game.turn],
@@ -271,6 +282,7 @@ def encode_gfen(game: Game) -> str:
         "1" if game._placement_done[Side.White] else "0",
         "1" if game._placement_done[Side.Black] else "0",
         str(game.move_count),
+        CODE_DIFFICULTY[game.config.difficulty],
     ]
     return " ".join(parts)
 
@@ -279,6 +291,10 @@ def decode_gfen(gfen: str, config: GameConfig | None = None) -> Game:
     """GFEN 文字列から Game を構築。
 
     'startpos' / 'startpos:<diff>' は規定の開始局面を返す。
+
+    GFEN 本文は 10 または 11 フィールド:
+      - 11 フィールド: 末尾が難易度コード。これが最優先で採用される
+      - 10 フィールド (旧仕様): config 引数 → デフォルト (INTRODUCTORY) の順
     """
     if gfen.startswith("startpos"):
         diff = "intro"
@@ -289,13 +305,20 @@ def decode_gfen(gfen: str, config: GameConfig | None = None) -> Game:
         return Game(config=GameConfig(difficulty=DIFFICULTY_CODE[diff]))
 
     parts = gfen.split(" ")
-    if len(parts) != 10:
+    if len(parts) not in (10, 11):
         raise ValueError(
-            f"GFEN must have 10 fields, got {len(parts)}: {gfen!r}"
+            f"GFEN must have 10 or 11 fields, got {len(parts)}: {gfen!r}"
         )
-    board_s, turn_s, phase_s, hw, hb, cw, cb, dw, db, ply_s = parts
+    board_s, turn_s, phase_s, hw, hb, cw, cb, dw, db, ply_s = parts[:10]
+    if len(parts) == 11:
+        diff_s = parts[10]
+        if diff_s not in DIFFICULTY_CODE:
+            raise ValueError(f"unknown difficulty in GFEN: {diff_s!r}")
+        cfg = GameConfig(difficulty=DIFFICULTY_CODE[diff_s])
+    else:
+        cfg = config or GameConfig()
 
-    game = Game(config=config or GameConfig())
+    game = Game(config=cfg)
     # 既定の初期化を上書きして空状態に
     game.board = Board()
     game.hand = {Side.White: [], Side.Black: []}
@@ -483,6 +506,9 @@ class UGIHandler:
 
     def __init__(self) -> None:
         self.game: Game = Game()
+        # `setoption name Difficulty value <v>` で受けた値を保持。
+        # `uginewgame` や `position startpos` (難易度指定なし) で適用される。
+        self._pending_difficulty: DifficultyLevel | None = None
 
     # 派生クラスがオーバーライドする思考メソッド ----------------------
 
@@ -500,26 +526,58 @@ class UGIHandler:
     def cmd_ugi(self, args: list[str]) -> Iterable[str]:
         yield f"id name {self.NAME}"
         yield f"id author {self.AUTHOR}"
+        # GUI に対して受付可能な option を提示する。Difficulty は
+        # combo 型で 4 段階のいずれかを GUI が `setoption` で送る想定。
+        yield (
+            "option name Difficulty type combo default intro"
+            " var intro var beginner var intermediate var advanced"
+        )
         yield "ugiok"
 
     def cmd_isready(self, args: list[str]) -> Iterable[str]:
         yield "readyok"
 
     def cmd_uginewgame(self, args: list[str]) -> Iterable[str]:
-        self.game = Game()
+        cfg = (
+            GameConfig(difficulty=self._pending_difficulty)
+            if self._pending_difficulty is not None else GameConfig()
+        )
+        self.game = Game(config=cfg)
         return []
 
     def cmd_position(self, args: list[str]) -> Iterable[str]:
         if not args:
             raise ValueError("position: missing args")
+        # 難易度の優先順位:
+        #   1. `startpos:<diff>` の明示指定
+        #   2. GFEN 11 番目フィールド (decode_gfen が処理)
+        #   3. `setoption Difficulty` による pending 値
+        #   4. デフォルト (INTRODUCTORY)
+        fallback_cfg = (
+            GameConfig(difficulty=self._pending_difficulty)
+            if self._pending_difficulty is not None else GameConfig()
+        )
         if args[0].startswith("startpos"):
-            self.game = decode_gfen(args[0])
+            spec = args[0]
+            # startpos 単体 (難易度指定なし) なら pending を当てる
+            if ":" not in spec and self._pending_difficulty is not None:
+                spec = f"startpos:{CODE_DIFFICULTY[self._pending_difficulty]}"
+            self.game = decode_gfen(spec)
             rest = args[1:]
         elif args[0] == "gfen":
-            if len(args) < 11:
-                raise ValueError("position gfen: needs 10 fields")
-            self.game = decode_gfen(" ".join(args[1:11]))
-            rest = args[11:]
+            # GFEN 本文は 10 or 11 トークン
+            if len(args) >= 12 and args[11] in ("moves",):
+                gfen_tokens = args[1:11]
+                rest = args[11:]
+            elif len(args) >= 12:
+                gfen_tokens = args[1:12]
+                rest = args[12:]
+            elif len(args) >= 11:
+                gfen_tokens = args[1:11]
+                rest = args[11:]
+            else:
+                raise ValueError("position gfen: needs 10 or 11 fields")
+            self.game = decode_gfen(" ".join(gfen_tokens), config=fallback_cfg)
         else:
             raise ValueError(f"position: unknown spec {args[0]!r}")
         if rest:
@@ -539,8 +597,28 @@ class UGIHandler:
         return []
 
     def cmd_setoption(self, args: list[str]) -> Iterable[str]:
-        # 派生クラスで処理する想定。デフォルトは無視。
-        return []
+        """`setoption name <key> value <val>` を処理。
+
+        標準オプション:
+          Difficulty: intro | beginner | intermediate | advanced
+            次の uginewgame / position startpos (難易度指定無し) に適用される。
+
+        派生クラスは追加 option を本メソッドのオーバーライドで処理する想定。
+        未知の name は info string で警告して無視。
+        """
+        kv = _kv_pairs(args)
+        name = kv.get("name")
+        value = kv.get("value")
+        if name is None or value is None:
+            yield "info string setoption: missing name/value"
+            return
+        if name == "Difficulty":
+            if value not in DIFFICULTY_CODE:
+                yield f"info string setoption Difficulty: unknown value {value!r}"
+                return
+            self._pending_difficulty = DIFFICULTY_CODE[value]
+            return
+        yield f"info string unknown option: {name}"
 
     def cmd_quit(self, args: list[str]) -> Iterable[str]:
         return []
