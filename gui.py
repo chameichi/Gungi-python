@@ -43,6 +43,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -60,8 +61,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from engine_bridge import EngineBridge
 from game import Action, ActionType, Game, GameConfig, GamePhase
 from pieces import PIECES_NAME, DifficultyLevel, Piece, PieceType, Side
+from protocol import (
+    CODE_DIFFICULTY,
+    encode_move,
+    load_game,
+    parse_move,
+    save_game,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -772,13 +781,27 @@ class MoveListPanel(QFrame):
         v.addWidget(self.list)
 
     def setEntries(self, labels: list[str], cursor: int) -> None:
-        self.list.clear()
-        for i, lab in enumerate(labels):
-            num = "—" if i == 0 else str(i)
-            item = QListWidgetItem(f"{num:>3}: {lab}")
-            self.list.addItem(item)
+        # ラベル列が同じなら clear+rebuild しない (スクロール位置リセット防止)
+        same_count = self.list.count() == len(labels)
+        same_text = same_count and all(
+            self.list.item(i).text() == self._format_row(i, labels[i])
+            for i in range(len(labels))
+        )
+        if not same_text:
+            self.list.clear()
+            for i, lab in enumerate(labels):
+                self.list.addItem(QListWidgetItem(self._format_row(i, lab)))
         if 0 <= cursor < self.list.count():
             self.list.setCurrentRow(cursor)
+            # 現在行を必ず可視領域に入れる
+            item = self.list.item(cursor)
+            if item is not None:
+                self.list.scrollToItem(item, QListWidget.ScrollHint.EnsureVisible)
+
+    @staticmethod
+    def _format_row(i: int, label: str) -> str:
+        num = "—" if i == 0 else str(i)
+        return f"{num:>3}: {label}"
 
     def _on_activate(self, item: QListWidgetItem) -> None:
         self.rowSelected.emit(self.list.row(item))
@@ -811,6 +834,12 @@ class GungiWindow(QMainWindow):
         self.selection = Selection()
         self.legal_dests: set[tuple[int, int]] = set()
         self.edit_mode = False
+        self._end_dialog_shown = False  # 終局ダイアログの重複表示防止
+
+        # AI 対戦
+        self.engine: EngineBridge | None = None
+        self.ai_side: Side | None = None  # AI が担当する側 (None なら人 vs 人)
+        self._ai_thinking = False
 
         self.setWindowTitle("軍議 - Gungi")
         self._move_labels: list[str]  # placeholder; will be populated each refresh
@@ -824,6 +853,8 @@ class GungiWindow(QMainWindow):
     def _build_toolbar(self) -> None:
         tb = QToolBar()
         tb.setMovable(False)
+        # 横幅が足りない場合は QToolBar が自動で extension button (≫) を出して
+        # 隠れた項目をポップアップに格納する。スタイルは下の QSS で当てる。
         tb.setStyleSheet(
             f"QToolBar {{ background:{COL_TOOLBAR_BG}; padding:6px; spacing:4px; }}"
             f"QToolButton {{ color:{COL_TOOLBAR_FG}; background:#2e7d32;"
@@ -833,9 +864,13 @@ class GungiWindow(QMainWindow):
             f"QToolButton:pressed {{ background:#1b5e20; }}"
             f"QToolButton:disabled {{ color:#9c9c9c; background:#3e3e3e; }}"
             f"QToolButton::menu-indicator {{ image:none; width:0; }}"  # ▾ をテキストで出すので非表示
+            # オーバーフロー時の ≫ ボタン (QToolBarExtension) を視認可能に
+            f"QToolBar QToolButton#qt_toolbar_ext_button {{"
+            f"  background:#1b5e20; color:{COL_TOOLBAR_FG};"
+            f"  border:1px solid #0e3d11; padding:6px 8px; }}"
         )
         self.addToolBar(tb)
-        # 新規対局プルダウン (初級 / 中級 / 上級)
+        # 新規対局プルダウン (入門 / 初級 / 中級 / 上級)
         self.btn_new_game = QToolButton()
         self.btn_new_game.setText("新規対局 ▾")
         self.btn_new_game.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
@@ -853,6 +888,18 @@ class GungiWindow(QMainWindow):
         self.btn_new_game.setMenu(new_menu)
         tb.addWidget(self.btn_new_game)
         tb.addSeparator()
+        # 棋譜操作プルダウン (保存・読込)
+        self.btn_kifu = QToolButton()
+        self.btn_kifu.setText("棋譜 ▾")
+        self.btn_kifu.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        kifu_menu = QMenu(self.btn_kifu)
+        self.act_save = kifu_menu.addAction("保存…")
+        self.act_save.triggered.connect(self.on_save_game)
+        self.act_load = kifu_menu.addAction("読込…")
+        self.act_load.triggered.connect(self.on_load_game)
+        self.btn_kifu.setMenu(kifu_menu)
+        tb.addWidget(self.btn_kifu)
+        tb.addSeparator()
         self.act_first = tb.addAction("◀◀ 開始")
         self.act_first.triggered.connect(self.on_goto_start)
         self.act_back = tb.addAction("◀ 戻す")
@@ -862,17 +909,39 @@ class GungiWindow(QMainWindow):
         self.act_last = tb.addAction("最新 ▶▶")
         self.act_last.triggered.connect(self.on_goto_end)
         tb.addSeparator()
-        self.act_edit = tb.addAction("編集モード")
+        # 編集ツールプルダウン (編集モード切替 + サブ操作)
+        self.btn_edit = QToolButton()
+        self.btn_edit.setText("編集 ▾")
+        self.btn_edit.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        edit_menu = QMenu(self.btn_edit)
+        self.act_edit = edit_menu.addAction("編集モード")
         self.act_edit.setCheckable(True)
         self.act_edit.toggled.connect(self.on_toggle_edit)
-        self.act_turn = tb.addAction("手番切替")
+        edit_menu.addSeparator()
+        self.act_turn = edit_menu.addAction("手番切替")
         self.act_turn.triggered.connect(self.on_toggle_turn)
-        self.act_clear = tb.addAction("盤面クリア")
+        self.act_clear = edit_menu.addAction("盤面クリア")
         self.act_clear.triggered.connect(self.on_clear_board)
-        self.act_add_piece = tb.addAction("駒追加")
+        self.act_add_piece = edit_menu.addAction("駒追加")
         self.act_add_piece.triggered.connect(self.on_add_piece)
-        self.act_phase = tb.addAction("段階切替")
+        self.act_phase = edit_menu.addAction("段階切替")
         self.act_phase.triggered.connect(self.on_toggle_phase)
+        self.btn_edit.setMenu(edit_menu)
+        tb.addWidget(self.btn_edit)
+        tb.addSeparator()
+        # AI 対戦プルダウン
+        self.btn_ai = QToolButton()
+        self.btn_ai.setText("AI 対戦 ▾")
+        self.btn_ai.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        ai_menu = QMenu(self.btn_ai)
+        self.act_ai_off = ai_menu.addAction("OFF (人 vs 人)")
+        self.act_ai_off.triggered.connect(lambda: self._set_ai_side(None))
+        self.act_ai_white = ai_menu.addAction("AI が先手 (白)")
+        self.act_ai_white.triggered.connect(lambda: self._set_ai_side(Side.White))
+        self.act_ai_black = ai_menu.addAction("AI が後手 (黒)")
+        self.act_ai_black.triggered.connect(lambda: self._set_ai_side(Side.Black))
+        self.btn_ai.setMenu(ai_menu)
+        tb.addWidget(self.btn_ai)
         tb.addSeparator()
         # 布陣段階 (中級/上級) 専用
         self.act_finish = tb.addAction("配置完了")
@@ -961,7 +1030,41 @@ class GungiWindow(QMainWindow):
 
     # ---- 描画更新 ----
 
+    def _maybe_show_end_dialog(self) -> None:
+        """対局終了の瞬間を検出して 1 度だけダイアログを出す。"""
+        if self.edit_mode:
+            return
+        is_end = (
+            self.game.winner is not None
+            or self.game.phase is GamePhase.FINISHED
+        )
+        if not is_end:
+            self._end_dialog_shown = False
+            return
+        if self._end_dialog_shown:
+            return
+        self._end_dialog_shown = True
+
+        if self.game.winner is not None:
+            cause = (
+                "詰み" if self.game.phase is GamePhase.FINISHED
+                and self.game.board.find_sui(self.game.winner.opponent()) is not None
+                else "帥捕獲"
+            )
+            title = "対局終了"
+            text = f"勝者: {self._turn_label(self.game.winner)} ({cause})"
+        else:
+            title = "対局終了 (千日手)"
+            text = "同一局面が 4 回現れたため再勝負となります。\n「新規対局」から始めてください。"
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle(title)
+        box.setText(text)
+        box.exec()
+
     def refresh(self) -> None:
+        # AI 手番なら思考依頼 (人 vs 人 / 編集中 / 終局時は no-op)
+        self._maybe_request_engine_move()
         self.board.selection_src = self.selection.src
         self.board.legal_dests = set(self.legal_dests)
         self.board.last_move = self._last_move_coords()
@@ -1004,6 +1107,8 @@ class GungiWindow(QMainWindow):
         self.act_turn.setEnabled(self.edit_mode)
         self.act_add_piece.setEnabled(self.edit_mode)
         self.act_phase.setEnabled(self.edit_mode)
+        # 編集モード ON 時はプルダウンの表記を変えて状態を明示
+        self.btn_edit.setText("編集 ● ▾" if self.edit_mode else "編集 ▾")
         # 配置完了はゲーム操作なので編集モード中は無効化
         self.act_finish.setEnabled(is_placement and not self.edit_mode)
 
@@ -1045,12 +1150,14 @@ class GungiWindow(QMainWindow):
             self.statusBar().showMessage(
                 f"勝者: {self._turn_label(self.game.winner)} ({cause})"
             )
+            self._maybe_show_end_dialog()
             return
         if self.game.phase is GamePhase.FINISHED:
             # 千日手による終局 (page 13: 再勝負)
             self.statusBar().showMessage(
                 "千日手で終局しました (再勝負) — 「新規対局」を選択してください"
             )
+            self._maybe_show_end_dialog()
             return
         n_legal = len(self.game.legal_actions())
         sennichi = " [千日手]" if self.game.is_sennichite() else ""
@@ -1063,6 +1170,8 @@ class GungiWindow(QMainWindow):
             f"手番: {self._turn_label(self.game.turn)} / 手数: {self.game.move_count}"
             f" / 合法手: {n_legal}{sennichi}{mode}"
         )
+        # 終局検出ダイアログ (対局継続中なら no-op)
+        self._maybe_show_end_dialog()
 
     @staticmethod
     def _turn_label(side: Side) -> str:
@@ -1194,7 +1303,12 @@ class GungiWindow(QMainWindow):
         # 編集モードを確実に対局モードへ戻す (UI と内部フラグ両方)
         self.act_edit.setChecked(False)
         self.edit_mode = False
+        self._end_dialog_shown = False
+        self._ai_thinking = False
         self.game.reset(GameConfig(difficulty=difficulty))
+        # AI 対戦中ならエンジンに新規対局を通知
+        if self.engine is not None and self.engine.is_running():
+            self._engine_newgame()
         self._reset_selection()
 
         if difficulty is not DifficultyLevel.BEGINNER:
@@ -1237,6 +1351,147 @@ class GungiWindow(QMainWindow):
             return
         self._reset_selection()
         self.refresh()
+
+    def on_save_game(self) -> None:
+        """棋譜を JSON ファイルに保存する。"""
+        path, _ = QFileDialog.getSaveFileName(
+            self, "棋譜を保存", "game.gungi.json",
+            "Gungi 棋譜 (*.gungi.json *.json);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            save_game(self.game, path)
+        except Exception as e:
+            QMessageBox.critical(self, "保存失敗", str(e))
+            return
+        self.statusBar().showMessage(f"保存しました: {path}", 3000)
+
+    def on_load_game(self) -> None:
+        """棋譜 JSON を読込み、現在の対局を置き換える。"""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "棋譜を読込", "",
+            "Gungi 棋譜 (*.gungi.json *.json);;All files (*)",
+        )
+        if not path:
+            return
+        ans = QMessageBox.question(
+            self, "棋譜読込",
+            "現在の対局・履歴を破棄して読込みますか?",
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            new_game = load_game(path)
+        except Exception as e:
+            QMessageBox.critical(self, "読込失敗", str(e))
+            return
+        self.act_edit.setChecked(False)
+        self.edit_mode = False
+        self._end_dialog_shown = False
+        self.game = new_game
+        self.board.game = new_game
+        self._reset_selection()
+        self.refresh()
+        self.statusBar().showMessage(f"読込みました: {path}", 3000)
+
+    # ---- AI 対戦 ----
+
+    def _set_ai_side(self, side: Side | None) -> None:
+        """AI の担当側を切替。None なら人 vs 人 (エンジンを停止)。"""
+        if side is None:
+            self.ai_side = None
+            self._stop_engine()
+            self.statusBar().showMessage("AI 対戦 OFF", 3000)
+            return
+        # エンジン未起動なら起動 + 初期化
+        self.ai_side = side
+        if self.engine is None or not self.engine.is_running():
+            self._start_engine()
+        else:
+            # 既起動の場合も難易度更新を含めて newgame
+            self._engine_newgame()
+        self.statusBar().showMessage(
+            f"AI 対戦 ON: AI = {self._turn_label(side)}", 3000
+        )
+        # AI 手番なら即座に思考依頼
+        self._maybe_request_engine_move()
+
+    def _start_engine(self) -> None:
+        """サブプロセスでスタブエンジンを起動。"""
+        self.engine = EngineBridge(self)
+        self.engine.bestmove_received.connect(self._on_engine_bestmove)
+        self.engine.line_received.connect(
+            lambda line: self.statusBar().showMessage(f"engine: {line}", 2000)
+        )
+        # `python engine_stub.py` を `uv run` 経由で起動
+        self.engine.start("uv", ["run", "python", "engine_stub.py"])
+        # ハンドシェイク
+        self.engine.send("ugi")
+        self.engine.send("isready")
+        self._engine_newgame()
+
+    def _stop_engine(self) -> None:
+        if self.engine is not None:
+            self.engine.stop()
+            self.engine = None
+        self._ai_thinking = False
+
+    def _engine_newgame(self) -> None:
+        """現在の難易度をエンジンに通知して newgame。"""
+        if self.engine is None:
+            return
+        diff_code = CODE_DIFFICULTY[self.game.config.difficulty]
+        self.engine.send(f"setoption name Difficulty value {diff_code}")
+        self.engine.send("uginewgame")
+
+    def _engine_position_and_go(self) -> None:
+        """エンジンに現在局面を伝えて go する。"""
+        if self.engine is None:
+            return
+        diff_code = CODE_DIFFICULTY[self.game.config.difficulty]
+        moves = " ".join(self.game.action_log)
+        if moves:
+            self.engine.send(f"position startpos:{diff_code} moves {moves}")
+        else:
+            self.engine.send(f"position startpos:{diff_code}")
+        self.engine.send("go movetime 500")
+        self._ai_thinking = True
+
+    def _maybe_request_engine_move(self) -> None:
+        """AI 手番なら思考を依頼する。"""
+        if self.ai_side is None or self.engine is None:
+            return
+        if self._ai_thinking or self.edit_mode:
+            return
+        if self.game.winner is not None or self.game.phase is GamePhase.FINISHED:
+            return
+        if self.game.turn is not self.ai_side:
+            return
+        self._engine_position_and_go()
+
+    def _on_engine_bestmove(self, move_str: str) -> None:
+        """エンジンが返した bestmove を game に適用する。"""
+        self._ai_thinking = False
+        if self.ai_side is None:
+            return
+        if self.game.turn is not self.ai_side:
+            # 局面が動いて AI 手番でなくなっている (操作競合)
+            return
+        try:
+            parse_move(move_str).apply(self.game)
+        except Exception as e:
+            QMessageBox.warning(
+                self, "AI 着手エラー",
+                f"AI の手 {move_str!r} を適用できませんでした: {e}"
+            )
+            return
+        self._reset_selection()
+        self.refresh()
+
+    def closeEvent(self, event) -> None:
+        self._stop_engine()
+        super().closeEvent(event)
 
     def on_undo(self) -> None:
         if self.game.undo():

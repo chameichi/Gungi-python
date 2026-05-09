@@ -117,8 +117,10 @@
 """
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable
 
 from board import Board, MAX_STACK_HEIGHT
@@ -487,6 +489,85 @@ def parse_move(s: str) -> ParsedMove:
             kind="drop", piece_type=CODE_PIECE[code], dst=(dx, dy),
         )
     raise ValueError(f"unrecognized move: {s!r}")
+
+
+# ---------------------------------------------------------------------------
+# 棋譜ファイル (.gungi.json): 初期局面 + 着手列の JSON 形式
+# ---------------------------------------------------------------------------
+
+KIFU_VERSION = 1
+
+
+def save_game(game: Game, path: str | Path) -> None:
+    """対局 (現在の cursor までの履歴) を JSON で保存する。
+
+    フォーマット:
+      {
+        "version": 1,
+        "initial_gfen": "<開始局面の GFEN>",
+        "moves": ["Su*40", "Su*48", "done", ...]
+      }
+    cursor が末尾でなくとも、cursor 位置までの手のみを保存する。
+    """
+    if not game._snapshots:
+        raise ValueError("no snapshots to save")
+    # snapshot[0] = 開始局面。当時の board/hand を一時復元して GFEN 化
+    saved_state = {
+        "board": game.board, "captured_by": game.captured_by,
+        "hand": game.hand, "turn": game.turn, "winner": game.winner,
+        "move_count": game.move_count, "history": list(game.history),
+        "phase": game.phase, "placement_done": dict(game._placement_done),
+        "action_log": list(game.action_log),
+    }
+    snap0 = game._snapshots[0]
+    game.board = snap0["board"]
+    game.captured_by = snap0["captured_by"]
+    game.hand = snap0["hand"]
+    game.turn = snap0["turn"]
+    game.winner = snap0["winner"]
+    game.move_count = snap0["move_count"]
+    game.history = list(snap0["history"])
+    game.phase = snap0.get("phase", GamePhase.PLAY)
+    game._placement_done = dict(snap0.get(
+        "placement_done", {Side.White: False, Side.Black: False}
+    ))
+    initial_gfen = encode_gfen(game)
+    # 復元
+    game.board = saved_state["board"]
+    game.captured_by = saved_state["captured_by"]
+    game.hand = saved_state["hand"]
+    game.turn = saved_state["turn"]
+    game.winner = saved_state["winner"]
+    game.move_count = saved_state["move_count"]
+    game.history = saved_state["history"]
+    game.phase = saved_state["phase"]
+    game._placement_done = saved_state["placement_done"]
+    game.action_log = saved_state["action_log"]
+
+    data = {
+        "version": KIFU_VERSION,
+        "initial_gfen": initial_gfen,
+        "moves": list(game.action_log),
+    }
+    Path(path).write_text(
+        json.dumps(data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def load_game(path: str | Path) -> Game:
+    """save_game で書き出した JSON を読み込み、Game を復元する。"""
+    raw = Path(path).read_text(encoding="utf-8")
+    data = json.loads(raw)
+    version = data.get("version")
+    if version != KIFU_VERSION:
+        raise ValueError(f"unsupported kifu version: {version}")
+    initial_gfen = data["initial_gfen"]
+    moves = data.get("moves", [])
+    game = decode_gfen(initial_gfen)
+    for tok in moves:
+        parse_move(tok).apply(game)
+    return game
 
 
 # ---------------------------------------------------------------------------

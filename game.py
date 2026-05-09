@@ -213,6 +213,9 @@ class Game:
     _snap_labels: list[str] = field(default_factory=list, repr=False)
     _cursor: int = 0  # _snapshots 上の現在位置
     _simulating: bool = field(default=False, repr=False)  # is_checkmate の再帰防止
+    # 棋譜保存・再生用: 初手からの UGI 文字列。snapshot[0] (初期局面) に対応する
+    # 「適用済み手の列」。len(action_log) == cursor が同期している前提。
+    action_log: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.board.grid:
@@ -238,6 +241,7 @@ class Game:
             "history": list(self.history),
             "phase": self.phase,
             "placement_done": dict(self._placement_done),
+            "action_log": list(self.action_log),
         }
         self._snapshots.append(snap)
         self._snap_labels.append(label)
@@ -256,6 +260,7 @@ class Game:
         self._placement_done = dict(
             snap.get("placement_done", {Side.White: False, Side.Black: False})
         )
+        self.action_log = list(snap.get("action_log", []))
         self._cursor = idx
 
     def reset(self, config: GameConfig | None = None) -> None:
@@ -278,6 +283,7 @@ class Game:
         self._snapshots = []
         self._snap_labels = []
         self._cursor = 0
+        self.action_log = []
         self._setup_initial()
         self._record_snapshot()
         diff_label = {
@@ -357,11 +363,16 @@ class Game:
                 and not self.config.allow_sui_stack:
             raise ValueError("この難易度では帥は1段目にのみ置けます")
 
+        # 棋譜用 UGI 文字列 (apply 前にキャプチャ: drop は piece_type のみで OK)
+        from protocol import PIECE_CODE  # 局所 import で循環回避
+        ugi_str = f"{PIECE_CODE[piece.piece_type]}*{x}{y}"
+
         self.hand[self.turn].remove(piece)
         self.board.place_initial(piece, x, y)
         self._update_bousho_transforms()
         side_mark = "▲" if self.turn is Side.White else "△"
         label = f"{side_mark}{piece.kanji} 布陣→({x},{y})"
+        self.action_log.append(ugi_str)
         # 相手が完了済みでなければ手番交代 (一手ごとに交互)
         other = self.turn.opponent()
         if not self._placement_done[other]:
@@ -407,6 +418,7 @@ class Game:
             # 先手の宣言 → 後手継続
             self._placement_done[Side.White] = True
             self.turn = Side.Black
+            self.action_log.append("done")
             self._snapshot_full_state(
                 label="先手 配置完了 / 後手の配置継続"
             )
@@ -421,6 +433,7 @@ class Game:
         self._placement_done[Side.Black] = True
         self.phase = GamePhase.PLAY
         self.turn = Side.White
+        self.action_log.append("done")
         # 対局開始局面を千日手検出用ヒストリに登録 (PLACEMENT 経由でも漏らさない)
         self._record_snapshot()
         self._snapshot_full_state(label="後手 配置完了 / 対局開始")
@@ -677,6 +690,9 @@ class Game:
         # 手の説明用に駒情報をスナップ前にキャプチャ
         kanji = self._lookup_kanji(action)
         side_mark = "▲" if self.turn is Side.White else "△"
+        # 棋譜用 UGI 文字列 (apply 前にキャプチャ: ARATA は piece_id 経由で hand 参照)
+        from protocol import encode_move  # 循環回避のため局所 import
+        ugi_str = encode_move(action, self)
 
         if action.type is ActionType.MOVE:
             self._apply_move(action)
@@ -690,6 +706,8 @@ class Game:
         self._update_bousho_transforms()
         self.move_count += 1
         self._check_win()
+        if not self._simulating:
+            self.action_log.append(ugi_str)
         if self.winner is None:
             self.turn = self.turn.opponent()
             if not self._simulating:
