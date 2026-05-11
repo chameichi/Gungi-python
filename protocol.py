@@ -498,6 +498,49 @@ def parse_move(s: str) -> ParsedMove:
 KIFU_VERSION = 1
 
 
+def initial_gfen_of(game: Game) -> str:
+    """`game._snapshots[0]` (開始局面) を GFEN 化して返す。
+
+    呼出時の state を一時的に snapshot[0] に差し替えて `encode_gfen` し、
+    終わり際に元の state へ戻す。複数フォーマット (.gungi / .json 等) の
+    save 実装から共有して使うためのヘルパー。
+    """
+    if not game._snapshots:
+        raise ValueError("no snapshots to save")
+    saved_state = {
+        "board": game.board, "captured_by": game.captured_by,
+        "hand": game.hand, "turn": game.turn, "winner": game.winner,
+        "move_count": game.move_count, "history": list(game.history),
+        "phase": game.phase, "placement_done": dict(game._placement_done),
+        "action_log": list(game.action_log),
+    }
+    snap0 = game._snapshots[0]
+    try:
+        game.board = snap0["board"]
+        game.captured_by = snap0["captured_by"]
+        game.hand = snap0["hand"]
+        game.turn = snap0["turn"]
+        game.winner = snap0["winner"]
+        game.move_count = snap0["move_count"]
+        game.history = list(snap0["history"])
+        game.phase = snap0.get("phase", GamePhase.PLAY)
+        game._placement_done = dict(snap0.get(
+            "placement_done", {Side.White: False, Side.Black: False}
+        ))
+        return encode_gfen(game)
+    finally:
+        game.board = saved_state["board"]
+        game.captured_by = saved_state["captured_by"]
+        game.hand = saved_state["hand"]
+        game.turn = saved_state["turn"]
+        game.winner = saved_state["winner"]
+        game.move_count = saved_state["move_count"]
+        game.history = saved_state["history"]
+        game.phase = saved_state["phase"]
+        game._placement_done = saved_state["placement_done"]
+        game.action_log = saved_state["action_log"]
+
+
 def save_game(game: Game, path: str | Path) -> None:
     """対局 (現在の cursor までの履歴) を JSON で保存する。
 
@@ -509,44 +552,9 @@ def save_game(game: Game, path: str | Path) -> None:
       }
     cursor が末尾でなくとも、cursor 位置までの手のみを保存する。
     """
-    if not game._snapshots:
-        raise ValueError("no snapshots to save")
-    # snapshot[0] = 開始局面。当時の board/hand を一時復元して GFEN 化
-    saved_state = {
-        "board": game.board, "captured_by": game.captured_by,
-        "hand": game.hand, "turn": game.turn, "winner": game.winner,
-        "move_count": game.move_count, "history": list(game.history),
-        "phase": game.phase, "placement_done": dict(game._placement_done),
-        "action_log": list(game.action_log),
-    }
-    snap0 = game._snapshots[0]
-    game.board = snap0["board"]
-    game.captured_by = snap0["captured_by"]
-    game.hand = snap0["hand"]
-    game.turn = snap0["turn"]
-    game.winner = snap0["winner"]
-    game.move_count = snap0["move_count"]
-    game.history = list(snap0["history"])
-    game.phase = snap0.get("phase", GamePhase.PLAY)
-    game._placement_done = dict(snap0.get(
-        "placement_done", {Side.White: False, Side.Black: False}
-    ))
-    initial_gfen = encode_gfen(game)
-    # 復元
-    game.board = saved_state["board"]
-    game.captured_by = saved_state["captured_by"]
-    game.hand = saved_state["hand"]
-    game.turn = saved_state["turn"]
-    game.winner = saved_state["winner"]
-    game.move_count = saved_state["move_count"]
-    game.history = saved_state["history"]
-    game.phase = saved_state["phase"]
-    game._placement_done = saved_state["placement_done"]
-    game.action_log = saved_state["action_log"]
-
     data = {
         "version": KIFU_VERSION,
-        "initial_gfen": initial_gfen,
+        "initial_gfen": initial_gfen_of(game),
         "moves": list(game.action_log),
     }
     Path(path).write_text(

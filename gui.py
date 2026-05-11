@@ -25,7 +25,9 @@ from __future__ import annotations
 import signal
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum, auto
+from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
@@ -63,13 +65,17 @@ from PySide6.QtWidgets import (
 
 from engine_bridge import EngineBridge
 from game import Action, ActionType, Game, GameConfig, GamePhase
+from kifu_format import (
+    FORMATS as KIFU_FORMATS,
+    filter_strings as kifu_filter_strings,
+    resolve_load_format,
+    resolve_save_format,
+)
 from pieces import PIECES_NAME, DifficultyLevel, Piece, PieceType, Side
 from protocol import (
     CODE_DIFFICULTY,
     encode_move,
-    load_game,
     parse_move,
-    save_game,
 )
 
 
@@ -827,13 +833,20 @@ class Selection:
 # ---------------------------------------------------------------------------
 
 
+class UIMode(Enum):
+    """ウィンドウの操作モード。AI 起動や入力可否の単一の真実の源。"""
+    MATCH = auto()      # 対局中: AI 起動可、着手で履歴を進める通常モード
+    EDIT = auto()       # 局面編集中: AI は起動しない、駒の追加削除可
+    ANALYSIS = auto()   # 検討モード (将来): AI は起動しない、自由に手を試せる
+
+
 class GungiWindow(QMainWindow):
     def __init__(self, game: Game) -> None:
         super().__init__()
         self.game = game
         self.selection = Selection()
         self.legal_dests: set[tuple[int, int]] = set()
-        self.edit_mode = False
+        self.ui_mode = UIMode.MATCH
         self._end_dialog_shown = False  # 終局ダイアログの重複表示防止
 
         # AI 対戦
@@ -1032,7 +1045,7 @@ class GungiWindow(QMainWindow):
 
     def _maybe_show_end_dialog(self) -> None:
         """対局終了の瞬間を検出して 1 度だけダイアログを出す。"""
-        if self.edit_mode:
+        if self.ui_mode is not UIMode.MATCH:
             return
         is_end = (
             self.game.winner is not None
@@ -1089,7 +1102,7 @@ class GungiWindow(QMainWindow):
         self.white_cap.setPieces(self.game.captured_by[Side.White], self.selection.arata_piece_id)
         # パネルの「+」ボタンを編集モード時のみ表示
         for panel in (self.black_hand, self.black_cap, self.white_hand, self.white_cap):
-            panel.set_edit_mode(self.edit_mode)
+            panel.set_edit_mode(self.ui_mode is UIMode.EDIT)
 
         labels = getattr(self.game, "_snap_labels", None)
         if labels is None:
@@ -1103,17 +1116,18 @@ class GungiWindow(QMainWindow):
         self.act_back.setEnabled(self.game.can_undo())
         self.act_forward.setEnabled(self.game.can_redo())
         self.act_last.setEnabled(self.game.can_redo())
-        self.act_clear.setEnabled(self.edit_mode)
-        self.act_turn.setEnabled(self.edit_mode)
-        self.act_add_piece.setEnabled(self.edit_mode)
-        self.act_phase.setEnabled(self.edit_mode)
+        is_edit = self.ui_mode is UIMode.EDIT
+        self.act_clear.setEnabled(is_edit)
+        self.act_turn.setEnabled(is_edit)
+        self.act_add_piece.setEnabled(is_edit)
+        self.act_phase.setEnabled(is_edit)
         # 編集モード ON 時はプルダウンの表記を変えて状態を明示
-        self.btn_edit.setText("編集 ● ▾" if self.edit_mode else "編集 ▾")
+        self.btn_edit.setText("編集 ● ▾" if is_edit else "編集 ▾")
         # 配置完了はゲーム操作なので編集モード中は無効化
-        self.act_finish.setEnabled(is_placement and not self.edit_mode)
+        self.act_finish.setEnabled(is_placement and not is_edit)
 
         # ステータス
-        if self.edit_mode:
+        if is_edit:
             self.statusBar().showMessage(
                 f"[編集モード] 手番: {self._turn_label(self.game.turn)} / 手数: {self.game.move_count}"
             )
@@ -1200,7 +1214,7 @@ class GungiWindow(QMainWindow):
 
     def on_cell_clicked(self, x: int, y: int) -> None:
         coord = (x, y)
-        if self.edit_mode:
+        if self.ui_mode is UIMode.EDIT:
             self._handle_edit_click(coord)
             return
         if self.game.phase is GamePhase.PLACEMENT:
@@ -1239,7 +1253,7 @@ class GungiWindow(QMainWindow):
         self.refresh()
 
     def on_hand_clicked(self, side: Side, piece_id: str, source: str = "hand") -> None:
-        if self.edit_mode:
+        if self.ui_mode is UIMode.EDIT:
             self._handle_edit_hand_click(side, piece_id, source)
             return
         if self.game.winner is not None:
@@ -1302,7 +1316,7 @@ class GungiWindow(QMainWindow):
             return
         # 編集モードを確実に対局モードへ戻す (UI と内部フラグ両方)
         self.act_edit.setChecked(False)
-        self.edit_mode = False
+        self.ui_mode = UIMode.MATCH
         self._end_dialog_shown = False
         self._ai_thinking = False
         self.game.reset(GameConfig(difficulty=difficulty))
@@ -1353,27 +1367,28 @@ class GungiWindow(QMainWindow):
         self.refresh()
 
     def on_save_game(self) -> None:
-        """棋譜を JSON ファイルに保存する。"""
-        path, _ = QFileDialog.getSaveFileName(
-            self, "棋譜を保存", "game.gungi.json",
-            "Gungi 棋譜 (*.gungi.json *.json);;All files (*)",
+        """棋譜を選択されたフォーマットで保存する。"""
+        default_ext = KIFU_FORMATS[0].extension
+        default_name = f"gungi_{datetime.now():%Y%m%d_%H%M%S}.{default_ext}"
+        path_str, selected_filter = QFileDialog.getSaveFileName(
+            self, "棋譜を保存", default_name, kifu_filter_strings(),
         )
-        if not path:
+        if not path_str:
             return
+        path, fmt = resolve_save_format(Path(path_str), selected_filter)
         try:
-            save_game(self.game, path)
+            fmt.save(self.game, path)
         except Exception as e:
             QMessageBox.critical(self, "保存失敗", str(e))
             return
-        self.statusBar().showMessage(f"保存しました: {path}", 3000)
+        self.statusBar().showMessage(f"保存しました ({fmt.description}): {path}", 3000)
 
     def on_load_game(self) -> None:
-        """棋譜 JSON を読込み、現在の対局を置き換える。"""
-        path, _ = QFileDialog.getOpenFileName(
-            self, "棋譜を読込", "",
-            "Gungi 棋譜 (*.gungi.json *.json);;All files (*)",
+        """棋譜を読込み、現在の対局を置き換える。"""
+        path_str, selected_filter = QFileDialog.getOpenFileName(
+            self, "棋譜を読込", "", kifu_filter_strings(),
         )
-        if not path:
+        if not path_str:
             return
         ans = QMessageBox.question(
             self, "棋譜読込",
@@ -1381,13 +1396,15 @@ class GungiWindow(QMainWindow):
         )
         if ans != QMessageBox.StandardButton.Yes:
             return
+        path = Path(path_str)
+        fmt = resolve_load_format(path, selected_filter)
         try:
-            new_game = load_game(path)
+            new_game = fmt.load(path)
         except Exception as e:
             QMessageBox.critical(self, "読込失敗", str(e))
             return
         self.act_edit.setChecked(False)
-        self.edit_mode = False
+        self.ui_mode = UIMode.MATCH
         self._end_dialog_shown = False
         self.game = new_game
         self.board.game = new_game
@@ -1459,14 +1476,20 @@ class GungiWindow(QMainWindow):
         self._ai_thinking = True
 
     def _maybe_request_engine_move(self) -> None:
-        """AI 手番なら思考を依頼する。"""
+        """AI 手番なら思考を依頼する。対局モード以外では起動しない。"""
+        if self.ui_mode is not UIMode.MATCH:
+            return
         if self.ai_side is None or self.engine is None:
             return
-        if self._ai_thinking or self.edit_mode:
+        if self._ai_thinking:
             return
         if self.game.winner is not None or self.game.phase is GamePhase.FINISHED:
             return
         if self.game.turn is not self.ai_side:
+            return
+        # 履歴を遡って閲覧中 (末尾以外) は AI を起こさない。
+        # 起こしてしまうと着手で未来側の snapshot が切り詰められ、redo 不能になる。
+        if self.game.can_redo():
             return
         self._engine_position_and_go()
 
@@ -1514,18 +1537,18 @@ class GungiWindow(QMainWindow):
         self.refresh()
 
     def on_toggle_edit(self, on: bool) -> None:
-        self.edit_mode = on
+        self.ui_mode = UIMode.EDIT if on else UIMode.MATCH
         self._reset_selection()
         self.refresh()
 
     def on_toggle_turn(self) -> None:
-        if not self.edit_mode:
+        if self.ui_mode is not UIMode.EDIT:
             return
         self.game.edit_set_turn(self.game.turn.opponent())
         self.refresh()
 
     def on_clear_board(self) -> None:
-        if not self.edit_mode:
+        if self.ui_mode is not UIMode.EDIT:
             return
         ans = QMessageBox.question(
             self, "確認", "盤面の全駒を削除しますか? (戻す で復元できます)"
@@ -1536,7 +1559,7 @@ class GungiWindow(QMainWindow):
             self.refresh()
 
     def on_add_piece(self) -> None:
-        if not self.edit_mode:
+        if self.ui_mode is not UIMode.EDIT:
             return
         dlg = AddPieceDialog(self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -1555,7 +1578,7 @@ class GungiWindow(QMainWindow):
 
     def on_panel_add(self, side: Side, source: str) -> None:
         """各パネルの「+」ボタンが押されたとき。色と追加先はパネルに紐付く。"""
-        if not self.edit_mode:
+        if self.ui_mode is not UIMode.EDIT:
             return
         side_label = "白" if side is Side.White else "黒"
         list_label = "手駒" if source == "hand" else "捕獲駒"
@@ -1575,7 +1598,7 @@ class GungiWindow(QMainWindow):
         self.refresh()
 
     def on_toggle_phase(self) -> None:
-        if not self.edit_mode:
+        if self.ui_mode is not UIMode.EDIT:
             return
         if self.game.phase is GamePhase.PLACEMENT:
             self.game.edit_set_phase(GamePhase.PLAY)
