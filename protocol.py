@@ -81,6 +81,9 @@
       position <spec> [moves <m1> <m2> ...]
                               spec = startpos[:diff] | gfen <gfen 10/11 fields>
       go [movetime <ms>] [depth <n>] [nodes <n>] [infinite]
+      go mate <N|infinite>    任意局面からの詰み探索 (Phase 1: スタブ)
+                              N は最大手数 (詰み手順の長さ)。
+                              応答は `bestmove` ではなく `checkmate ...`。
       stop                    思考停止 (現時点の最善手を返す)
       setoption name <k> value <v>
         標準オプション:
@@ -97,6 +100,10 @@
       option name <k> type <t> default <v> [min <m>] [max <M>] [var <v1> ...]
       info depth <n> score cp <eval> nodes <n> time <ms> pv <m1> <m2> ...
       bestmove <move> [ponder <move>]
+      checkmate <m1> <m2> ...     詰み手順 (go mate 応答)
+      checkmate nomate            この局面では詰まない
+      checkmate timeout           制限時間/手数内に解けなかった
+      checkmate notimplemented    詰み探索未実装 (デフォルト UGIHandler)
 
 ================================================================
 6. セッション例
@@ -117,8 +124,10 @@
 """
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable
 
 from board import Board, MAX_STACK_HEIGHT
@@ -366,6 +375,20 @@ _DROP_RE = re.compile(r"^([A-Z][a-z])\*([0-8])([0-8])$")
 
 
 @dataclass(frozen=True)
+class MateResult:
+    """`go mate` の探索結果。
+
+    kind:
+      'mate'           : moves に詰み手順 (UGI トークン列) を含める
+      'nomate'         : この局面では詰まないことを証明済み
+      'timeout'        : 制限時間/手数内に解けなかった (打ち切り)
+      'notimplemented' : このエンジンは詰み探索未対応
+    """
+    kind: str
+    moves: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ParsedMove:
     """UGI 文字列を分解した中間表現。Game に適用するメソッド付き。
 
@@ -490,6 +513,93 @@ def parse_move(s: str) -> ParsedMove:
 
 
 # ---------------------------------------------------------------------------
+# 棋譜ファイル (.gungi.json): 初期局面 + 着手列の JSON 形式
+# ---------------------------------------------------------------------------
+
+KIFU_VERSION = 1
+
+
+def initial_gfen_of(game: Game) -> str:
+    """`game._snapshots[0]` (開始局面) を GFEN 化して返す。
+
+    呼出時の state を一時的に snapshot[0] に差し替えて `encode_gfen` し、
+    終わり際に元の state へ戻す。複数フォーマット (.gungi / .json 等) の
+    save 実装から共有して使うためのヘルパー。
+    """
+    if not game._snapshots:
+        raise ValueError("no snapshots to save")
+    saved_state = {
+        "board": game.board, "captured_by": game.captured_by,
+        "hand": game.hand, "turn": game.turn, "winner": game.winner,
+        "move_count": game.move_count, "history": list(game.history),
+        "phase": game.phase, "placement_done": dict(game._placement_done),
+        "action_log": list(game.action_log),
+    }
+    snap0 = game._snapshots[0]
+    try:
+        game.board = snap0["board"]
+        game.captured_by = snap0["captured_by"]
+        game.hand = snap0["hand"]
+        game.turn = snap0["turn"]
+        game.winner = snap0["winner"]
+        game.move_count = snap0["move_count"]
+        game.history = list(snap0["history"])
+        game.phase = snap0.get("phase", GamePhase.PLAY)
+        game._placement_done = dict(snap0.get(
+            "placement_done", {Side.White: False, Side.Black: False}
+        ))
+        return encode_gfen(game)
+    finally:
+        game.board = saved_state["board"]
+        game.captured_by = saved_state["captured_by"]
+        game.hand = saved_state["hand"]
+        game.turn = saved_state["turn"]
+        game.winner = saved_state["winner"]
+        game.move_count = saved_state["move_count"]
+        game.history = saved_state["history"]
+        game.phase = saved_state["phase"]
+        game._placement_done = saved_state["placement_done"]
+        game.action_log = saved_state["action_log"]
+
+
+def save_game(game: Game, path: str | Path) -> None:
+    """対局 (現在の cursor までの履歴) を JSON で保存する。
+
+    フォーマット:
+      {
+        "version": 1,
+        "initial_gfen": "<開始局面の GFEN>",
+        "moves": ["Su*40", "Su*48", "done", ...]
+      }
+    cursor が末尾でなくとも、cursor 位置までの手のみを保存する。
+    """
+    data = {
+        "version": KIFU_VERSION,
+        "initial_gfen": initial_gfen_of(game),
+        "moves": list(game.action_log),
+    }
+    Path(path).write_text(
+        json.dumps(data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def load_game(path: str | Path) -> Game:
+    """save_game で書き出した JSON を読み込み、Game を復元する。"""
+    raw = Path(path).read_text(encoding="utf-8")
+    data = json.loads(raw)
+    version = data.get("version")
+    if version != KIFU_VERSION:
+        raise ValueError(f"unsupported kifu version: {version}")
+    initial_gfen = data["initial_gfen"]
+    moves = data.get("moves", [])
+    game = decode_gfen(initial_gfen)
+    for tok in moves:
+        parse_move(tok).apply(game)
+    return game
+
+
+# ---------------------------------------------------------------------------
 # UGI ハンドラの参考実装 (本物のエンジンはこれを継承して search を実装)
 # ---------------------------------------------------------------------------
 
@@ -520,6 +630,20 @@ class UGIHandler:
         if not legal:
             return RESIGN
         return encode_move(legal[0], self.game)
+
+    def search_mate(self, max_moves: int | None) -> "MateResult":
+        """詰み探索。Phase 1 のデフォルトは未実装ステータスを返す。
+
+        max_moves: 最大手数 (None なら無制限 = `go mate infinite`)。
+        派生クラスはこれをオーバーライドして実際の詰み探索を実装する。
+
+        戻り値の MateResult:
+            kind='mate'  + moves=[詰み手順]   → `checkmate <手順>`
+            kind='nomate'                     → `checkmate nomate`
+            kind='timeout'                    → `checkmate timeout`
+            kind='notimplemented' (デフォルト)→ `checkmate notimplemented`
+        """
+        return MateResult(kind="notimplemented")
 
     # コマンドハンドラ ------------------------------------------------
 
@@ -588,10 +712,37 @@ class UGIHandler:
         return []
 
     def cmd_go(self, args: list[str]) -> Iterable[str]:
+        # `go mate <N|infinite>` は専用ハンドラへ
+        if args and args[0] == "mate":
+            yield from self._cmd_go_mate(args[1:])
+            return
         params = _kv_pairs(args)
         move = self.search(params)
         yield f"info depth 1 score cp 0 pv {move}"
         yield f"bestmove {move}"
+
+    def _cmd_go_mate(self, args: list[str]) -> Iterable[str]:
+        """`go mate <N|infinite>` の応答。
+        Phase 1: search_mate() を呼んで checkmate ... を返すだけ。
+        """
+        max_moves: int | None
+        if not args:
+            max_moves = None
+        elif args[0] == "infinite":
+            max_moves = None
+        else:
+            try:
+                max_moves = int(args[0])
+            except ValueError:
+                yield f"info string go mate: invalid N {args[0]!r}"
+                return
+        result = self.search_mate(max_moves)
+        if result.kind == "mate":
+            yield f"checkmate {' '.join(result.moves)}"
+        elif result.kind in ("nomate", "timeout", "notimplemented"):
+            yield f"checkmate {result.kind}"
+        else:
+            yield f"info string go mate: unknown result kind {result.kind!r}"
 
     def cmd_stop(self, args: list[str]) -> Iterable[str]:
         return []
