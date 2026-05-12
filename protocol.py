@@ -1,4 +1,4 @@
-"""UGI - Universal Gungi Interface (v2)
+"""UGI - Universal Gungi Interface
 
 将棋の USI に相当する、Gungi のエンジン-GUI 通信プロトコル。
 
@@ -60,8 +60,7 @@
     cap_w/cap_b : 同上
     done_w/done_b: 0 | 1
     ply: 整数
-    diff: intro | beginner | intermediate | advanced (v2 で追加)
-        旧仕様 (10 フィールド) もデコード時は受理する。
+    diff: intro | beginner | intermediate | advanced
 
     特殊形:
       startpos:intro          入門編 (初期配置①)
@@ -277,9 +276,7 @@ def _parse_piece_list(
 
 
 def encode_gfen(game: Game) -> str:
-    """Game の現状態を GFEN 文字列に (11 フィールド)。
-    末尾の難易度フィールドは v2 で追加された。
-    旧仕様 (10 フィールド) を扱うデコーダとも互換。"""
+    """Game の現状態を GFEN 文字列に (11 フィールド)。"""
     parts = [
         encode_board(game.board),
         SIDE_CODE[game.turn],
@@ -296,14 +293,11 @@ def encode_gfen(game: Game) -> str:
     return " ".join(parts)
 
 
-def decode_gfen(gfen: str, config: GameConfig | None = None) -> Game:
+def decode_gfen(gfen: str) -> Game:
     """GFEN 文字列から Game を構築。
 
     'startpos' / 'startpos:<diff>' は規定の開始局面を返す。
-
-    GFEN 本文は 10 または 11 フィールド:
-      - 11 フィールド: 末尾が難易度コード。これが最優先で採用される
-      - 10 フィールド (旧仕様): config 引数 → デフォルト (INTRODUCTORY) の順
+    GFEN 本文は 11 フィールド (末尾が難易度コード)。
     """
     if gfen.startswith("startpos"):
         diff = "intro"
@@ -314,18 +308,14 @@ def decode_gfen(gfen: str, config: GameConfig | None = None) -> Game:
         return Game(config=GameConfig(difficulty=DIFFICULTY_CODE[diff]))
 
     parts = gfen.split(" ")
-    if len(parts) not in (10, 11):
+    if len(parts) != 11:
         raise ValueError(
-            f"GFEN must have 10 or 11 fields, got {len(parts)}: {gfen!r}"
+            f"GFEN must have 11 fields, got {len(parts)}: {gfen!r}"
         )
-    board_s, turn_s, phase_s, hw, hb, cw, cb, dw, db, ply_s = parts[:10]
-    if len(parts) == 11:
-        diff_s = parts[10]
-        if diff_s not in DIFFICULTY_CODE:
-            raise ValueError(f"unknown difficulty in GFEN: {diff_s!r}")
-        cfg = GameConfig(difficulty=DIFFICULTY_CODE[diff_s])
-    else:
-        cfg = config or GameConfig()
+    board_s, turn_s, phase_s, hw, hb, cw, cb, dw, db, ply_s, diff_s = parts
+    if diff_s not in DIFFICULTY_CODE:
+        raise ValueError(f"unknown difficulty in GFEN: {diff_s!r}")
+    cfg = GameConfig(difficulty=DIFFICULTY_CODE[diff_s])
 
     game = Game(config=cfg)
     # 既定の初期化を上書きして空状態に
@@ -675,12 +665,8 @@ class UGIHandler:
         # 難易度の優先順位:
         #   1. `startpos:<diff>` の明示指定
         #   2. GFEN 11 番目フィールド (decode_gfen が処理)
-        #   3. `setoption Difficulty` による pending 値
+        #   3. startpos (難易度指定なし) のとき `setoption Difficulty` の pending 値
         #   4. デフォルト (INTRODUCTORY)
-        fallback_cfg = (
-            GameConfig(difficulty=self._pending_difficulty)
-            if self._pending_difficulty is not None else GameConfig()
-        )
         if args[0].startswith("startpos"):
             spec = args[0]
             # startpos 単体 (難易度指定なし) なら pending を当てる
@@ -689,19 +675,12 @@ class UGIHandler:
             self.game = decode_gfen(spec)
             rest = args[1:]
         elif args[0] == "gfen":
-            # GFEN 本文は 10 or 11 トークン
-            if len(args) >= 12 and args[11] in ("moves",):
-                gfen_tokens = args[1:11]
-                rest = args[11:]
-            elif len(args) >= 12:
-                gfen_tokens = args[1:12]
-                rest = args[12:]
-            elif len(args) >= 11:
-                gfen_tokens = args[1:11]
-                rest = args[11:]
-            else:
-                raise ValueError("position gfen: needs 10 or 11 fields")
-            self.game = decode_gfen(" ".join(gfen_tokens), config=fallback_cfg)
+            # GFEN 本文は 11 トークン
+            if len(args) < 12:
+                raise ValueError("position gfen: needs 11 fields")
+            gfen_tokens = args[1:12]
+            rest = args[12:]
+            self.game = decode_gfen(" ".join(gfen_tokens))
         else:
             raise ValueError(f"position: unknown spec {args[0]!r}")
         if rest:

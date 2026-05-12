@@ -171,7 +171,9 @@ $RESULT:*
 
 ## UGI プロトコル
 
-USI に倣った Gungi 用プロトコル。詳細は `protocol.py` 冒頭の docstring 参照。
+USI に倣った Gungi 用プロトコル。**完全な仕様は [docs/UGI.md](docs/UGI.md) を参照**。
+関連仕様: [docs/GFEN.md](docs/GFEN.md) (局面表記)、[docs/GSA.md](docs/GSA.md) (棋譜フォーマット)。
+以下は要約。
 
 ### 駒コード
 
@@ -205,8 +207,7 @@ USI に倣った Gungi 用プロトコル。詳細は `protocol.py` 冒頭の do
 ```
 
 - `board` は 9 段を `/` 区切り、各段を `|` 区切り、空きマスは数字で圧縮
-- `diff` は `intro | beginner | intermediate | advanced` の難易度コード（v2 で追加）
-- 旧仕様の 10 フィールド GFEN もデコード時に受理（後方互換）
+- `diff` は `intro | beginner | intermediate | advanced` の難易度コード
 - `startpos:intro` 等のショートカットで難易度別の開始局面を指定可能
 
 ### コマンド (USI 準拠)
