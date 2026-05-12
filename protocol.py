@@ -81,6 +81,9 @@
       position <spec> [moves <m1> <m2> ...]
                               spec = startpos[:diff] | gfen <gfen 10/11 fields>
       go [movetime <ms>] [depth <n>] [nodes <n>] [infinite]
+      go mate <N|infinite>    任意局面からの詰み探索 (Phase 1: スタブ)
+                              N は最大手数 (詰み手順の長さ)。
+                              応答は `bestmove` ではなく `checkmate ...`。
       stop                    思考停止 (現時点の最善手を返す)
       setoption name <k> value <v>
         標準オプション:
@@ -97,6 +100,10 @@
       option name <k> type <t> default <v> [min <m>] [max <M>] [var <v1> ...]
       info depth <n> score cp <eval> nodes <n> time <ms> pv <m1> <m2> ...
       bestmove <move> [ponder <move>]
+      checkmate <m1> <m2> ...     詰み手順 (go mate 応答)
+      checkmate nomate            この局面では詰まない
+      checkmate timeout           制限時間/手数内に解けなかった
+      checkmate notimplemented    詰み探索未実装 (デフォルト UGIHandler)
 
 ================================================================
 6. セッション例
@@ -368,6 +375,20 @@ _DROP_RE = re.compile(r"^([A-Z][a-z])\*([0-8])([0-8])$")
 
 
 @dataclass(frozen=True)
+class MateResult:
+    """`go mate` の探索結果。
+
+    kind:
+      'mate'           : moves に詰み手順 (UGI トークン列) を含める
+      'nomate'         : この局面では詰まないことを証明済み
+      'timeout'        : 制限時間/手数内に解けなかった (打ち切り)
+      'notimplemented' : このエンジンは詰み探索未対応
+    """
+    kind: str
+    moves: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ParsedMove:
     """UGI 文字列を分解した中間表現。Game に適用するメソッド付き。
 
@@ -610,6 +631,20 @@ class UGIHandler:
             return RESIGN
         return encode_move(legal[0], self.game)
 
+    def search_mate(self, max_moves: int | None) -> "MateResult":
+        """詰み探索。Phase 1 のデフォルトは未実装ステータスを返す。
+
+        max_moves: 最大手数 (None なら無制限 = `go mate infinite`)。
+        派生クラスはこれをオーバーライドして実際の詰み探索を実装する。
+
+        戻り値の MateResult:
+            kind='mate'  + moves=[詰み手順]   → `checkmate <手順>`
+            kind='nomate'                     → `checkmate nomate`
+            kind='timeout'                    → `checkmate timeout`
+            kind='notimplemented' (デフォルト)→ `checkmate notimplemented`
+        """
+        return MateResult(kind="notimplemented")
+
     # コマンドハンドラ ------------------------------------------------
 
     def cmd_ugi(self, args: list[str]) -> Iterable[str]:
@@ -677,10 +712,37 @@ class UGIHandler:
         return []
 
     def cmd_go(self, args: list[str]) -> Iterable[str]:
+        # `go mate <N|infinite>` は専用ハンドラへ
+        if args and args[0] == "mate":
+            yield from self._cmd_go_mate(args[1:])
+            return
         params = _kv_pairs(args)
         move = self.search(params)
         yield f"info depth 1 score cp 0 pv {move}"
         yield f"bestmove {move}"
+
+    def _cmd_go_mate(self, args: list[str]) -> Iterable[str]:
+        """`go mate <N|infinite>` の応答。
+        Phase 1: search_mate() を呼んで checkmate ... を返すだけ。
+        """
+        max_moves: int | None
+        if not args:
+            max_moves = None
+        elif args[0] == "infinite":
+            max_moves = None
+        else:
+            try:
+                max_moves = int(args[0])
+            except ValueError:
+                yield f"info string go mate: invalid N {args[0]!r}"
+                return
+        result = self.search_mate(max_moves)
+        if result.kind == "mate":
+            yield f"checkmate {' '.join(result.moves)}"
+        elif result.kind in ("nomate", "timeout", "notimplemented"):
+            yield f"checkmate {result.kind}"
+        else:
+            yield f"info string go mate: unknown result kind {result.kind!r}"
 
     def cmd_stop(self, args: list[str]) -> Iterable[str]:
         return []
