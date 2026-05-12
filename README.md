@@ -4,6 +4,7 @@
 
 ## 目次
 
+- [仕様ドキュメント](#仕様ドキュメント)
 - [機能](#機能)
 - [起動方法](#起動方法)
 - [プロジェクト構成](#プロジェクト構成)
@@ -11,6 +12,14 @@
 - [操作](#操作)
 - [棋譜フォーマット](#棋譜フォーマット)
 - [UGI プロトコル](#ugi-プロトコル)
+
+## 仕様ドキュメント
+
+詳細仕様は `docs/` 配下に分割しています:
+
+- [docs/UGI.md](docs/UGI.md) — Universal Gungi Interface (通信プロトコル)
+- [docs/GFEN.md](docs/GFEN.md) — Gungi Forsyth-Edwards Notation (局面表記)
+- [docs/GSA.md](docs/GSA.md) — Gungi Standard Action (棋譜フォーマット)
 
 ## 機能
 
